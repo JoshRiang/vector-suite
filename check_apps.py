@@ -24,21 +24,63 @@ APPS = {
     "vector-finance": "vector_finance",
 }
 
-# Symbols that only exist in package:flutter/material.dart. These apps are
-# Cupertino-only (uses-material-design: false), so using them is a real bug
-# that standalone analysis often misses.
-# NOTE: matched with a negative lookbehind for "Cupertino" -- `CupertinoColors`
-# and `CupertinoPageScaffold` are legitimate and must not trip the check.
+# Symbols that only exist in package:flutter/material.dart. These apps import
+# ONLY package:flutter/cupertino.dart, so using any of these is a hard compile
+# error ("method not found").
+#
+# WHY THIS LIST IS LONG: a short list gives false confidence. An earlier
+# version omitted RefreshIndicator, the apps passed the local check, and two
+# CI builds failed on it -- a check that misses real bugs is worse than no
+# check, because it is trusted.
+#
+# Matched with a negative lookbehind for "Cupertino" so CupertinoColors,
+# CupertinoPageScaffold, CupertinoSliverRefreshControl etc. do not trip it.
 MATERIAL_ONLY = [
-    r"(?<!Cupertino)\bColors\.",
+    # scaffolding / app shell
+    r"(?<!Cupertino)\bMaterialApp\b",
     r"(?<!Cupertino)\bScaffold\(",
-    r"\bMaterialApp\b",
-    r"(?<!Cupertino)\bListTile\b",
-    r"(?<!Cupertino)\bDivider\(",
+    r"(?<!Cupertino)\bAppBar\(",
+    r"(?<!Cupertino)\bMaterial\(",
+    r"(?<!Cupertino)\bTheme\(",
+    r"(?<!Cupertino)\bThemeData\b",
+    # progress + refresh
+    r"\bRefreshIndicator\b",
     r"\bLinearProgressIndicator\b",
     r"\bCircularProgressIndicator\b",
-    r"\bTextField\(",
+    # text input + buttons
+    r"(?<!Cupertino)\bTextField\(",
+    r"(?<!Cupertino)\bTextFormField\b",
     r"\bElevatedButton\b",
+    r"\bTextButton\b",
+    r"\bOutlinedButton\b",
+    r"\bIconButton\b",
+    r"\bFloatingActionButton\b",
+    r"\bDropdownButton\b",
+    r"\bCheckbox\b",
+    r"\bSwitch\(",
+    r"\bRadio\(",
+    r"\bSlider\(",
+    # lists, tiles, dividers
+    r"(?<!Cupertino)\bListTile\b",
+    r"(?<!Cupertino)\bDivider\(",
+    r"(?<!Cupertino)\bListView\(",
+    r"(?<!Cupertino)\bGridView\(",
+    r"\bExpansionTile\b",
+    r"\bStepper\b",
+    # sheets, dialogs, snackbars
+    r"\bshowDialog\b",
+    r"\bAlertDialog\b",
+    r"\bBottomSheet\b",
+    r"\bSnackBar\b",
+    r"\bScaffoldMessenger\b",
+    r"\bDrawer\(",
+    r"\bTabBar\(",
+    r"\bBottomNavigationBar\b",
+    # theming helpers
+    r"(?<!Cupertino)\bColors\.",
+    r"(?<!Cupertino)\bIcons\.",
+    r"(?<!Cupertino)\bTextTheme\b",
+    r"(?<!Cupertino)\bColorScheme\b",
 ]
 
 # Packages that are framework-provided, not the app's own package name.
@@ -136,6 +178,13 @@ def check(app: str, pkg: str) -> list[str]:
             m = re.search(pat, src)
             if m:
                 errs.append(f"{rel}: uses Material-only symbol '{m.group(0)}'")
+
+        # 2b. The strongest possible form of the check above: these apps must
+        #     never import Material at all. If this holds, every Material widget
+        #     is a compile error, so the list above is belt-and-braces.
+        if re.search(r"import\s+'package:flutter/material\.dart'", src):
+            errs.append(f"{rel}: imports package:flutter/material.dart "
+                        f"(these apps are Cupertino-only)")
 
         # 3. Imports used by the file must be declared.
         if "http." in src and "package:http/http.dart" not in src:
