@@ -23,6 +23,18 @@ class Api {
     defaultValue: 'http://100.89.180.23:8790',
   );
 
+  /// Stable owner id.
+  ///
+  /// This is a single-user personal deployment, so the id is a constant rather
+  /// than a random per-install value. That matters: the proactive morning
+  /// brief runs server-side and must read the SAME rows the apps write. A
+  /// random per-install id would silently split the data in two and the brief
+  /// would always report "no goals".
+  static const defaultUserId = String.fromEnvironment(
+    'USER_ID',
+    defaultValue: 'josh',
+  );
+
   final String baseUrl;
   final String userId;
 

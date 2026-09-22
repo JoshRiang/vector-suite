@@ -22,6 +22,7 @@ SUITES = [
     ("api routing",   ROOT / "backend/test_api.py"),
     ("decomposition", ROOT / "backend/test_decompose.py"),
     ("timezone",      ROOT / "backend/test_timezone.py"),
+    ("daily brief",   ROOT / "backend/test_daily_brief.py"),
     ("flutter apps",  ROOT / "check_apps.py"),
 ]
 
