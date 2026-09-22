@@ -2,6 +2,7 @@ data/
 __pycache__/
 *.pyc
 .env
+*.log
 vector-tasks/
 vector-calendar/
 vector-finance/
