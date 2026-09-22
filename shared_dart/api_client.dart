@@ -14,8 +14,9 @@ import 'dart:io' show SocketException;
 import 'package:http/http.dart' as http;
 
 class Api {
-  Api({String? baseUrl, required this.userId})
-      : baseUrl = baseUrl ?? defaultBaseUrl;
+  Api({String? baseUrl, required this.userId, String? apiKey})
+      : baseUrl = baseUrl ?? defaultBaseUrl,
+        apiKey = apiKey ?? defaultApiKey;
 
   /// Tailscale address of the home server. Private to the user's own network.
   static const defaultBaseUrl = String.fromEnvironment(
@@ -35,14 +36,26 @@ class Api {
     defaultValue: 'josh',
   );
 
+  /// Shared secret for the API.
+  ///
+  /// Required once the backend is reachable from the public internet: without
+  /// it, anyone with the URL could read the owner's data. Injected at build
+  /// time (--dart-define=API_KEY=...) so it is not hardcoded in the repo.
+  static const defaultApiKey = String.fromEnvironment(
+    'API_KEY',
+    defaultValue: '',
+  );
+
   final String baseUrl;
   final String userId;
+  final String apiKey;
 
   static const _timeout = Duration(seconds: 30);
 
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
         'X-User-Id': userId,
+        if (apiKey.isNotEmpty) 'X-Api-Key': apiKey,
       };
 
   Future<dynamic> _send(String method, String path,

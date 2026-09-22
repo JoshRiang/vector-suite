@@ -223,8 +223,67 @@ def check(app: str, pkg: str) -> list[str]:
     wf = d / ".github/workflows/build.yml"
     if not wf.exists():
         errs.append("missing .github/workflows/build.yml")
-    elif "flutter test" not in wf.read_text():
-        errs.append("CI workflow does not run flutter test")
+    else:
+        wtext = wf.read_text()
+        if "flutter test" not in wtext:
+            errs.append("CI workflow does not run flutter test")
+        if "API_BASE" not in wtext:
+            errs.append("CI workflow does not inject API_BASE")
+        if "API_KEY" not in wtext:
+            errs.append("CI workflow does not inject API_KEY")
+
+    # 8. Home-screen widget wiring.
+    #    A provider that is generated but not declared in the manifest compiles
+    #    and ships, yet NEVER appears in the launcher's widget picker -- a
+    #    silent failure with no build error to catch it. So every one of these
+    #    is checked explicitly.
+    manifest = (d / "android/app/src/main/AndroidManifest.xml").read_text()
+    res = d / "android/app/src/main/res"
+
+    providers = list((d / "android/app/src/main/kotlin").rglob("*Widget.kt"))
+    if not providers:
+        errs.append("no AppWidgetProvider class found")
+    for prov in providers:
+        cls = prov.stem
+        src_k = prov.read_text()
+
+        if f'android:name=".{cls}"' not in manifest:
+            errs.append(f"widget {cls} not declared as <receiver> in manifest")
+        if "android.appwidget.action.APPWIDGET_UPDATE" not in manifest:
+            errs.append("manifest missing APPWIDGET_UPDATE intent-filter")
+        if "android.appwidget.provider" not in manifest:
+            errs.append("manifest missing android.appwidget.provider metadata")
+
+        # Provider class must extend AppWidgetProvider and read the shared
+        # endpoint resource, or the widget would point at a different server
+        # than the app.
+        if "AppWidgetProvider" not in src_k:
+            errs.append(f"{cls}: does not extend AppWidgetProvider")
+        if "R.string.vector_api_base" not in src_k:
+            errs.append(f"{cls}: does not read vector_api_base")
+        if "thread {" not in src_k and "Thread(" not in src_k:
+            errs.append(f"{cls}: does network work without a background thread")
+
+        # Every referenced layout/id/resource must exist, or AAPT fails.
+        for m in re.finditer(r"R\.layout\.(\w+)", src_k):
+            if not (res / "layout" / f"{m.group(1)}.xml").exists():
+                errs.append(f"{cls}: R.layout.{m.group(1)} does not exist")
+        for m in re.finditer(r"R\.string\.(\w+)", src_k):
+            strings = res / "values/strings.xml"
+            if strings.exists() and f'name="{m.group(1)}"' not in strings.read_text():
+                errs.append(f"{cls}: R.string.{m.group(1)} not in strings.xml")
+
+        # The provider-info XML the manifest points at must exist.
+        for m in re.finditer(r'android:resource="@xml/(\w+)"', manifest):
+            if not (res / "xml" / f"{m.group(1)}.xml").exists():
+                errs.append(f"@xml/{m.group(1)} referenced but missing")
+
+        # Layouts must declare every namespace they use.
+        for lay in (res / "layout").glob("*.xml"):
+            ls = lay.read_text()
+            for prefix in ("tools", "app"):
+                if f"{prefix}:" in ls and f"xmlns:{prefix}=" not in ls:
+                    errs.append(f"{lay.name}: uses {prefix}: without xmlns:{prefix}")
 
     return errs
 

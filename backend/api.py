@@ -43,6 +43,27 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 PORT = int(os.environ.get("PORT", "8790"))
 
+# Shared-secret auth.
+#
+# WHY THIS EXISTS: the API previously trusted the X-User-Id header outright.
+# That is acceptable on a Tailscale-private network, but the moment the service
+# is reachable from the public internet (a tunnel, a public host) it means
+# anyone who learns the URL can read the owner's finances and write tasks.
+# So a secret is required as soon as VECTOR_API_KEY is set.
+#
+# Left unset, the service runs open -- which keeps local/Tailscale development
+# working and makes the requirement explicit rather than silently insecure.
+API_KEY = os.environ.get("VECTOR_API_KEY", "")
+
+
+def _auth_ok(headers: dict) -> bool:
+    """Constant-time compare so the check cannot be timed."""
+    if not API_KEY:
+        return True
+    import hmac
+    supplied = headers.get("X-Api-Key") or headers.get("x-api-key") or ""
+    return hmac.compare_digest(supplied, API_KEY)
+
 
 def _now_local_iso() -> str:
     """Timestamp written on completion.
@@ -260,18 +281,26 @@ def _json_response(status: int, payload: Any) -> tuple[int, dict, bytes]:
     return status, {"Content-Type": "application/json"}, json.dumps(payload).encode()
 
 
-def route(method: str, path: str, body: dict, user_id: str | None) -> tuple[int, dict, bytes]:
+def route(method: str, path: str, body: dict, user_id: str | None,
+          api_key: str | None = None) -> tuple[int, dict, bytes]:
     """Pure routing function -- testable without a live socket."""
     p = path.rstrip("/") or "/"
 
     if p == "/health" and method == "GET":
+        # Deliberately unauthenticated: a health probe that needs a secret is
+        # useless for uptime monitoring, and it exposes no user data.
         return _json_response(200, {
             "ok": True,
             "db": "supabase" if (SUPABASE_URL and SUPABASE_SERVICE_KEY)
                   else "local-sqlite",
+            "auth": bool(API_KEY),
             "llm": bool(os.environ.get("LLM_API_KEY") or os.environ.get("LLM_MODEL")
                         or os.path.exists(os.path.expanduser("~/.hermes/config.yaml"))),
         })
+
+    # Every data route requires the shared secret when one is configured.
+    if not _auth_ok({"X-Api-Key": api_key or ""}):
+        return _json_response(401, {"error": "unauthorized"})
 
     if not user_id:
         return _json_response(401, {"error": "missing_user"})
@@ -345,6 +374,7 @@ def build_wsgi_app():
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/")
         user_id = environ.get("HTTP_X_USER_ID")
+        api_key = environ.get("HTTP_X_API_KEY")
 
         length = int(environ.get("CONTENT_LENGTH") or 0)
         body: dict = {}
@@ -356,7 +386,7 @@ def build_wsgi_app():
                 start_response(f"{status} Bad Request", list(headers.items()))
                 return [payload]
 
-        status, headers, payload = route(method, path, body, user_id)
+        status, headers, payload = route(method, path, body, user_id, api_key)
         start_response(f"{status} OK", list(headers.items()))
         return [payload]
 

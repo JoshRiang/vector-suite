@@ -31,6 +31,26 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 API = os.environ.get("VECTOR_API", "http://127.0.0.1:8790")
+# The API requires a shared secret once it is publicly reachable. Read it from
+# the environment or the backend .env so the brief keeps working after auth is
+# switched on (otherwise the cron job silently starts returning 401).
+def _load_api_key() -> str:
+    key = os.environ.get("VECTOR_API_KEY", "")
+    if key:
+        return key
+    # Single source of truth: the root .env the service unit also loads.
+    env = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    try:
+        with open(env) as fh:
+            for line in fh:
+                if line.startswith("VECTOR_API_KEY="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+API_KEY = _load_api_key()
 USER_ID = os.environ.get("VECTOR_USER", "josh")
 TZ = timezone(timedelta(hours=7))          # WIB
 
@@ -38,7 +58,11 @@ TZ = timezone(timedelta(hours=7))          # WIB
 def api_get(path: str) -> object:
     req = urllib.request.Request(
         f"{API}{path}",
-        headers={"X-User-Id": USER_ID, "Content-Type": "application/json"},
+        headers={
+            "X-User-Id": USER_ID,
+            "Content-Type": "application/json",
+            **({"X-Api-Key": API_KEY} if API_KEY else {}),
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
