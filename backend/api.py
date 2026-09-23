@@ -182,6 +182,65 @@ def startable_tasks(user_id: str) -> list[dict]:
     })
 
 
+def goal_tasks(user_id: str, goal_id: str) -> dict[str, Any]:
+    """EVERY task under one goal, in dependency order, with status.
+
+    WHY this exists separately from /tasks/startable: the user has many goals
+    and wants to see and tick off the work inside each one. startable_tasks
+    deliberately hides blocked tasks, which is right for "what do I do now" but
+    useless for "where is this goal up to". This returns the full picture and
+    marks which rows are startable, so the app can show a checklist that
+    reflects the real dependency state instead of a flat list.
+    """
+    rows = db_request("GET", "tasks", params={
+        "user_id": f"eq.{user_id}",
+        "goal_id": f"eq.{goal_id}",
+        "order": "priority.asc,created_at.asc",
+    })
+    # A task is startable when it has no blocker, or its blocker is done.
+    by_id = {r["id"]: r for r in rows}
+    out = []
+    for r in rows:
+        blocker = by_id.get(r.get("blocked_by") or "")
+        startable = (not r.get("blocked_by")) or (
+            blocker is not None and blocker.get("status") == "done")
+        item = dict(r)
+        item["startable"] = bool(startable) and r.get("status") in ("todo", "doing")
+        item["blocked_by_title"] = (blocker or {}).get("title")
+        out.append(item)
+    done = sum(1 for r in rows if r.get("status") == "done")
+    return {
+        "goal_id": goal_id,
+        "tasks": out,
+        "total": len(rows),
+        "done": done,
+        "pct_done": round(100 * done / len(rows)) if rows else 0,
+    }
+
+
+def create_task(user_id: str, body: dict) -> dict:
+    """Add one task by hand (or by Hermes) to an existing goal.
+
+    This is the write path that makes the task list Hermes-managed rather than
+    app-managed: an agent can insert, reorder (priority) or block work without
+    the app shipping any planning logic of its own.
+    """
+    title = (body.get("title") or "").strip()
+    if not title:
+        raise ValueError("title_required")
+    rows = db_request("POST", "tasks", body={
+        "user_id": user_id,
+        "goal_id": body.get("goal_id"),
+        "title": title,
+        "why": body.get("why"),
+        "minutes": int(body.get("minutes") or 30),
+        "blocked_by": body.get("blocked_by"),
+        "priority": int(body.get("priority") or 3),
+        "source": body.get("source") or "user",
+    })
+    return rows[0] if isinstance(rows, list) and rows else rows
+
+
 def today_plan(user_id: str) -> dict[str, Any]:
     """Assemble today: what's startable, what's scheduled, what's been done."""
     today = _today_local()
@@ -327,6 +386,77 @@ def route(method: str, path: str, body: dict, user_id: str | None,
 
         if p == "/tasks/startable" and method == "GET":
             return _json_response(200, startable_tasks(user_id))
+
+        # --- goal-scoped task view (many goals, each with a checklist) --------
+        if p.startswith("/goals/") and p.endswith("/tasks") and method == "GET":
+            gid = p[len("/goals/"):-len("/tasks")].strip("/")
+            if not gid:
+                return _json_response(400, {"error": "goal_id_required"})
+            return _json_response(200, goal_tasks(user_id, gid))
+
+        if p.startswith("/goals/") and method == "PATCH":
+            gid = p[len("/goals/"):].strip("/")
+            patch = {k: body[k] for k in ("title", "detail", "target_date",
+                                          "status") if k in body}
+            if body.get("status") == "done":
+                patch["completed_at"] = _now_local_iso()
+            if not patch:
+                return _json_response(400, {"error": "nothing_to_update"})
+            rows = db_request("PATCH", "goals",
+                              params={"id": f"eq.{gid}",
+                                      "user_id": f"eq.{user_id}"},
+                              body=patch)
+            return _json_response(200, rows)
+
+        if p.startswith("/goals/") and method == "DELETE":
+            gid = p[len("/goals/"):].strip("/")
+            # Remove the goal's tasks first: the FK is not enforced on the
+            # Postgres side, so an orphaned task would keep showing up in
+            # startable_tasks with no goal to explain it.
+            db_request("DELETE", "tasks",
+                       params={"goal_id": f"eq.{gid}",
+                               "user_id": f"eq.{user_id}"})
+            rows = db_request("DELETE", "goals",
+                              params={"id": f"eq.{gid}",
+                                      "user_id": f"eq.{user_id}"})
+            return _json_response(200, rows)
+
+        if p == "/tasks" and method == "POST":
+            try:
+                return _json_response(201, create_task(user_id, body))
+            except ValueError as e:
+                return _json_response(400, {"error": str(e)})
+
+        # Quick actions so a home-screen widget can finish/skip a task with one
+        # tap, without opening the app. Kept as explicit verbs rather than a
+        # generic PATCH so the widget needs no request body at all.
+        if p.startswith("/tasks/") and p.endswith("/done") and method == "POST":
+            tid = p[len("/tasks/"):-len("/done")].strip("/")
+            rows = db_request("PATCH", "tasks",
+                              params={"id": f"eq.{tid}",
+                                      "user_id": f"eq.{user_id}"},
+                              body={"status": "done",
+                                    "completed_at": _now_local_iso()})
+            return _json_response(200, {"ok": True, "task": rows})
+
+        if p.startswith("/tasks/") and p.endswith("/skip") and method == "POST":
+            tid = p[len("/tasks/"):-len("/skip")].strip("/")
+            rows = db_request("PATCH", "tasks",
+                              params={"id": f"eq.{tid}",
+                                      "user_id": f"eq.{user_id}"},
+                              body={"status": "skipped"})
+            return _json_response(200, {"ok": True, "task": rows})
+
+        # Un-tick: the widget's checkbox toggles both ways, so a mis-tap must be
+        # reversible without opening the app. Clearing completed_at matters
+        # because "done today" filters on it.
+        if p.startswith("/tasks/") and p.endswith("/reopen") and method == "POST":
+            tid = p[len("/tasks/"):-len("/reopen")].strip("/")
+            rows = db_request("PATCH", "tasks",
+                              params={"id": f"eq.{tid}",
+                                      "user_id": f"eq.{user_id}"},
+                              body={"status": "todo", "completed_at": None})
+            return _json_response(200, {"ok": True, "task": rows})
 
         if p == "/tasks" and method == "PATCH":
             task_id = body.get("id")

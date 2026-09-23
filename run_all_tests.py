@@ -21,6 +21,7 @@ ROOT = Path("/home/josh/vector_suite")
 SUITES = [
     ("store",         ROOT / "backend/test_store.py"),
     ("api routing",   ROOT / "backend/test_api.py"),
+    ("goals + tasks", ROOT / "backend/test_goals.py"),
     ("decomposition", ROOT / "backend/test_decompose.py"),
     ("timezone",      ROOT / "backend/test_timezone.py"),
     ("auth",          ROOT / "backend/test_auth.py"),

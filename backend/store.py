@@ -389,7 +389,11 @@ def db_request(method: str, path: str, *, params: dict | None = None,
         sql = f"select * from {table}"
         if where:
             sql += " where " + " and ".join(where)
-        sql += _order_clause(params.get("order", ""), allowed)
+        # Ordering may use ANY real column, not just writable ones. Using the
+        # WRITABLE allowlist here wrongly rejected created_at/id/completed_at,
+        # which made "sort by newest" impossible for the goal checklist.
+        # Order is a read concern; WRITABLE remains the guard for writes.
+        sql += _order_clause(params.get("order", ""), _columns(table))
         if params.get("limit"):
             try:
                 sql += f" limit {int(params['limit'])}"

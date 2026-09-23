@@ -59,6 +59,37 @@ class FakeApi:
         raise AssertionError(f"unexpected path {path}")
 
 
+def _seed_goal(uid: str, title: str, tasks: list[tuple[str, int]],
+               blocked_chain: bool = True) -> dict:
+    """Insert a goal with a FIXED task list, bypassing the model.
+
+    WHY NOT create_goal_with_tasks(): that calls the live LLM, so the number of
+    tasks (and therefore any `tasks[1]` access) varied between runs and the test
+    failed intermittently with IndexError. These tests are about what the brief
+    SAYS, not about decomposition quality, so the plan is stated explicitly and
+    the assertions are deterministic.
+    """
+    goal = store.db_request("POST", "goals",
+                            body={"user_id": uid, "title": title})[0]
+    inserted = []
+    prev = None
+    for i, (t_title, minutes) in enumerate(tasks):
+        row = store.db_request("POST", "tasks", body={
+            "user_id": uid,
+            "goal_id": goal["id"],
+            "title": t_title,
+            "minutes": minutes,
+            # A linear chain means exactly one task is startable at a time.
+            "blocked_by": prev if blocked_chain else None,
+            "priority": 2 if i == 0 else 3,
+            "source": "ai",
+        })[0]
+        if blocked_chain:
+            prev = row["id"]
+        inserted.append(row)
+    return {"goal": goal, "tasks": inserted, "degraded": False, "note": ""}
+
+
 def main() -> int:
     store.init_db()
 
@@ -71,7 +102,11 @@ def main() -> int:
 
     print("\nwith a goal")
     uid = str(uuid.uuid4())
-    d = api.create_goal_with_tasks(uid, "Ship the VECTOR apps", None, None)
+    d = _seed_goal(uid, "Ship the VECTOR apps", [
+        ("Write the release checklist", 15),
+        ("Cut the release build", 25),
+        ("Publish the APK", 20),
+    ])
     daily_brief.api_get = FakeApi(uid)
     out = daily_brief.build_brief()
     check("names exactly one start action", out.count("Start here") == 1, out)
@@ -79,6 +114,8 @@ def main() -> int:
           d["tasks"][0]["title"][:30] in out, out)
     check("states a time estimate", "min" in out, out)
     check("shows goal progress", "%" in out, out)
+    check("the plan really has a second task to advance to",
+          len(d["tasks"]) >= 2, str(len(d["tasks"])))
 
     print("\nit never dumps the whole backlog")
     check("does not list every task title",
@@ -94,8 +131,11 @@ def main() -> int:
 
     print("\nwith several independent startable tasks")
     uid2 = str(uuid.uuid4())
-    api.create_goal_with_tasks(uid2, "Learn stochastic calculus", None, None)
-    api.create_goal_with_tasks(uid2, "Write a research note on volatility", None, None)
+    # Unblocked plans so two goals really do give two startable tasks at once.
+    _seed_goal(uid2, "Learn stochastic calculus",
+               [("Read the first chapter", 20)], blocked_chain=False)
+    _seed_goal(uid2, "Write a research note on volatility",
+               [("Outline the note", 15)], blocked_chain=False)
     daily_brief.api_get = FakeApi(uid2)
     out2 = daily_brief.build_brief()
     n2 = len(api.startable_tasks(uid2))

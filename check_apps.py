@@ -273,6 +273,19 @@ def check(app: str, pkg: str) -> list[str]:
             if strings.exists() and f'name="{m.group(1)}"' not in strings.read_text():
                 errs.append(f"{cls}: R.string.{m.group(1)} not in strings.xml")
 
+        # Every R.id must exist in one of this app's layouts. This is the same
+        # class of failure as a missing string, but it slipped through once: a
+        # shared helper referencing row ids that only one app's layout defined
+        # compiled fine in that app and broke the other two. Checking it here
+        # catches it before CI does.
+        layout_ids: set[str] = set()
+        for lay in (res / "layout").glob("*.xml"):
+            layout_ids |= set(re.findall(
+                r'android:id="@\+id/(\w+)"', lay.read_text()))
+        for m in re.finditer(r"R\.id\.(\w+)", src_k):
+            if m.group(1) not in layout_ids:
+                errs.append(f"{cls}: R.id.{m.group(1)} not in any layout")
+
         # The provider-info XML the manifest points at must exist.
         for m in re.finditer(r'android:resource="@xml/(\w+)"', manifest):
             if not (res / "xml" / f"{m.group(1)}.xml").exists():

@@ -74,6 +74,8 @@ class Api {
           res = await http
               .patch(uri, headers: _headers, body: jsonEncode(body ?? {}))
               .timeout(_timeout);
+        case 'DELETE':
+          res = await http.delete(uri, headers: _headers).timeout(_timeout);
         default:
           throw ApiException('unsupported method $method');
       }
@@ -87,7 +89,7 @@ class Api {
       return decoded;
     } on SocketException {
       throw ApiException(
-          'Cannot reach the server. Are you on Tailscale?', offline: true);
+          'Cannot reach the server. Check your connection.', offline: true);
     }
   }
 
@@ -122,6 +124,41 @@ class Api {
 
   Future<void> setTaskStatus(String id, String status) =>
       _send('PATCH', '/tasks', body: {'id': id, 'status': status});
+
+  /// Mark one task done, from a list row.
+  Future<void> completeTask(String id) => _send('POST', '/tasks/$id/done');
+
+  /// Undo an accidental completion. The row is un-ticked in place.
+  Future<void> reopenTask(String id) => _send('POST', '/tasks/$id/reopen');
+
+  /// Every task under one goal, each flagged startable or blocked.
+  Future<Map<String, dynamic>> goalTasks(String goalId) async =>
+      (await _send('GET', '/goals/$goalId/tasks')) as Map<String, dynamic>;
+
+  /// Add a task to a goal.
+  ///
+  /// The app can add tasks, but it never PLANS: the ordering, the dependencies
+  /// and the next action are decided server-side, so the same list shows up
+  /// here, in the widgets and in Hermes's own view of the work.
+  Future<Map<String, dynamic>> addTask(
+    String goalId,
+    String title, {
+    int minutes = 30,
+    String? why,
+    int priority = 3,
+  }) async =>
+      (await _send('POST', '/tasks', body: {
+        'goal_id': goalId,
+        'title': title,
+        'minutes': minutes,
+        if (why != null && why.isNotEmpty) 'why': why,
+        'priority': priority,
+      })) as Map<String, dynamic>;
+
+  Future<void> renameGoal(String goalId, String title) =>
+      _send('PATCH', '/goals/$goalId', body: {'title': title});
+
+  Future<void> deleteGoal(String goalId) => _send('DELETE', '/goals/$goalId');
 
   Future<void> addExpense(num amount, {String? note, String? category}) =>
       _send('POST', '/expenses', body: {
@@ -163,4 +200,90 @@ class GoalResult {
 
   int get totalMinutes =>
       tasks.fold(0, (s, t) => s + ((t['minutes'] as num?)?.toInt() ?? 0));
+}
+
+/// One goal's full checklist, as returned by `GET /goals/<id>/tasks`.
+///
+/// Parsing lives here rather than in the widget so the classification rules
+/// (done / startable / blocked-and-why) are unit-testable without a device.
+class GoalTasks {
+  GoalTasks({
+    required this.goalId,
+    required this.tasks,
+    required this.total,
+    required this.done,
+    required this.pctDone,
+  });
+
+  final String goalId;
+  final List<Map<String, dynamic>> tasks;
+  final int total;
+  final int done;
+  final int pctDone;
+
+  factory GoalTasks.fromJson(Map<String, dynamic> j) {
+    final list = ((j['tasks'] as List?) ?? []).cast<Map<String, dynamic>>();
+    final done =
+        (j['done'] as num?)?.toInt() ?? list.where((t) => t['status'] == 'done').length;
+    final total = (j['total'] as num?)?.toInt() ?? list.length;
+    return GoalTasks(
+      goalId: (j['goal_id'] ?? '').toString(),
+      tasks: list,
+      total: total,
+      done: done,
+      // Derive rather than trust: a server that omits pct_done would otherwise
+      // render an empty progress bar and look like a bug.
+      pctDone: (j['pct_done'] as num?)?.toInt() ??
+          (total == 0 ? 0 : ((100 * done) / total).round()),
+    );
+  }
+
+  /// Rows the user can act on now, in the order the server returned them.
+  List<Map<String, dynamic>> get startable =>
+      tasks.where((t) => t['startable'] == true).toList();
+}
+
+/// A single task row's display state, derived once so every surface agrees.
+class TaskState {
+  const TaskState({
+    required this.id,
+    required this.title,
+    required this.minutes,
+    required this.status,
+    required this.startable,
+    required this.blockerTitle,
+  });
+
+  final String id;
+  final String title;
+  final int minutes;
+  final String status;
+  final bool startable;
+  final String? blockerTitle;
+
+  bool get isDone => status == 'done';
+  bool get isSkipped => status == 'skipped';
+
+  factory TaskState.fromJson(Map<String, dynamic> t) => TaskState(
+        id: (t['id'] ?? '').toString(),
+        title: (t['title'] ?? '').toString(),
+        minutes: (t['minutes'] as num?)?.toInt() ?? 30,
+        status: (t['status'] ?? 'todo').toString(),
+        startable: t['startable'] == true,
+        blockerTitle: t['blocked_by_title']?.toString(),
+      );
+
+  /// The one line under the title that explains the row's state.
+  ///
+  /// A blocked row must name what it waits on: a greyed row with no
+  /// explanation reads as a broken app rather than a dependency.
+  String get subtitle {
+    if (isDone) return 'Done';
+    if (isSkipped) return 'Skipped';
+    if (startable) return '$minutes min  ·  ready now';
+    if (blockerTitle != null && blockerTitle!.isNotEmpty) {
+      return '$minutes min  ·  after “$blockerTitle”';
+    }
+    return '$minutes min  ·  waiting';
+  }
 }

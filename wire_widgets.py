@@ -44,8 +44,13 @@ def add_strings(app_dir: Path, label: str) -> None:
         "widget_label": label,
         "widget_loading": "Loading&#8230;",
         "widget_offline": "Server unreachable",
-        "widget_offline_hint": "Check your connection",
+        "widget_offline_hint": "Tap to retry",
         "widget_description": f"{label} from VECTOR",
+        # Shown when nothing is startable -- an empty widget looks broken, so
+        # it says so explicitly instead.
+        "widget_all_clear": "All clear &#8212; nothing to start",
+        # The one row in the tasks widget that is not a task.
+        "widget_ask": "Ask Hermes",
         "vector_api_base": DEFAULT_API,
         "vector_user_id": USER_ID,
     }
