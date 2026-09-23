@@ -83,10 +83,28 @@ flutter build apk --dart-define=API_BASE=http://<host>:8790
 
 ## Storage
 
-`backend/store.py` implements a PostgREST-compatible `db_request()` over local
-SQLite, so the system works with **zero** cloud setup. Point `SUPABASE_URL`
-and `SUPABASE_SERVICE_KEY` at a Supabase project and the same calls hit
-Postgres instead — no handler changes. `/health` reports which is active.
+`backend/store.py` implements a PostgREST-compatible `db_request()` over either
+engine, chosen by environment variable — no handler changes:
+
+- **No `DATABASE_URL`** → local SQLite. The system works with **zero** cloud
+  setup.
+- **`DATABASE_URL=postgresql://...`** → Postgres (Supabase). `pg_schema.sql` is
+  the DDL; `migrate_to_postgres.py` copies an existing SQLite book across and
+  verifies the row counts and the blocked-task invariant afterwards.
+
+`/health` reports which backend is actually in use, so a silent fallback to
+SQLite is visible rather than looking healthy while writing to the wrong place.
+
+`pgcompat.py` is a narrow `sqlite3`-compatible shim over psycopg2, so the query
+builder, filter parser and blocking logic are shared and tested once. It also
+emulates SQLite's per-statement error semantics: Postgres aborts the *entire*
+transaction on a failed statement, which would otherwise poison the API's
+per-thread connection and make every later request 500.
+
+Timestamps are stored as ISO **text**, not `timestamptz`, on purpose. The apps
+decide "what did I finish today" by comparing a local date against the stored
+value; `timestamptz` normalises to UTC and silently shifts tasks completed
+between 00:00 and 07:00 WIB into the previous day.
 
 ## Tests
 
@@ -95,13 +113,24 @@ python3 run_all_tests.py
 ```
 
 Covers store semantics, API routing, the decomposition parser, the timezone
-boundary, and structural checks on all three Flutter apps. No network needed.
+boundary, auth, and structural checks on all three Flutter apps. No network
+needed — the suites deliberately clear `DATABASE_URL` so they can never write to
+a live database.
+
+With a DSN set, two extra suites run against real Postgres:
+
+- `test_postgres.py` — replays every store assertion inside a throwaway schema
+  (dropped afterwards; production rows verified untouched).
+- `test_pg_dialect.py` — the differences that only bite in production: a failed
+  statement must not poison the connection, null-safe `is ?`, the PRAGMA shim,
+  and literal `%` escaping.
 
 ## Privacy
 
-Every table is row-level-security gated on `auth.uid()`. The anon key alone
-reads nothing. The backend runs on the owner's own server; the database is
-private to one user.
+Tables are RLS-enabled with no policy granting access, and default grants are
+revoked from the `anon`/`authenticated` roles, so a leaked client key reads
+nothing. The API itself authenticates with a shared secret and runs on the
+owner's own server; the database is private to one user.
 
 ## Not a licensed advisor
 
