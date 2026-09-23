@@ -3,6 +3,7 @@
 
 Backend (pure logic, no network):   store, api routing, decomposition, timezone
 Apps (structural, no toolchain):    check_apps.py
+Field contract (needs live API):    test_field_contract.py - Dart field reads vs API keys
 Postgres parity (only if a DSN is set): store behaviour + dialect differences
 
 Exit code is non-zero if anything fails, so CI or a shell `&&` chain can gate
