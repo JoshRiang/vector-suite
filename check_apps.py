@@ -286,6 +286,28 @@ def check(app: str, pkg: str) -> list[str]:
             if m.group(1) not in layout_ids:
                 errs.append(f"{cls}: R.id.{m.group(1)} not in any layout")
 
+        # Kotlin resolves fully-qualified types ONLY if they are imported (or in
+        # the same package). A missing `java.net.URL` import is a hard compile
+        # error that no structural check catches -- CI found it, this should.
+        # Maps a symbol to the import that must be present when it is used.
+        NEEDED_IMPORTS = {
+            "URL": "java.net.URL",
+            "HttpURLConnection": "java.net.HttpURLConnection",
+            "BufferedReader": "java.io.BufferedReader",
+            "InputStreamReader": "java.io.InputStreamReader",
+            "OutputStreamWriter": "java.io.OutputStreamWriter",
+            "JSONObject": "org.json.JSONObject",
+            "JSONArray": "org.json.JSONArray",
+            "Calendar": "java.util.Calendar",
+        }
+        imported = set(re.findall(r"^import\s+([\w.]+)", src_k, re.M))
+        for symbol, imp in NEEDED_IMPORTS.items():
+            # `URL(` or `: URL` or `URL ` -- a use, not the import line itself.
+            used = re.search(rf"(?<![\w.]){symbol}\s*[\(<)]", src_k) or \
+                re.search(rf"(?<![\w.]){symbol}\b(?!\s*\.)", src_k)
+            if used and imp not in imported:
+                errs.append(f"{cls}: uses {symbol} but does not import {imp}")
+
         # The provider-info XML the manifest points at must exist.
         for m in re.finditer(r'android:resource="@xml/(\w+)"', manifest):
             if not (res / "xml" / f"{m.group(1)}.xml").exists():
