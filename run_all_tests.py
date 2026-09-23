@@ -29,6 +29,7 @@ SUITES = [
     ("daily brief",   ROOT / "backend/test_daily_brief.py"),
     ("flutter apps",  ROOT / "check_apps.py"),
     ("calendar grid", ROOT / "verify_calendar_grid.py"),
+    ("endpoint fallback", ROOT / "verify_fallback.py"),
     # Needs the live API; skips itself cleanly if unreachable. This is the only
     # suite that compares the field names the Dart reads against the keys the
     # API returns - the gap that let a broken tasks app pass every other check.

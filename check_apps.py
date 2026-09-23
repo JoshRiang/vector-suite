@@ -285,6 +285,14 @@ def check(app: str, pkg: str) -> list[str]:
         if "thread {" not in src_k and "Thread(" not in src_k:
             errs.append(f"{cls}: does network work without a background thread")
 
+        # The app falls back to plain-http private addresses when the public
+        # endpoint is unreachable. Android blocks cleartext for targetSdk >= 28,
+        # so without this attribute every fallback fails as a ClientException and
+        # the app reports "unreachable" even when the LAN endpoint is live.
+        if "android:usesCleartextTraffic=\"true\"" not in manifest:
+            errs.append("manifest missing android:usesCleartextTraffic (http "
+                        "fallbacks would be blocked)")
+
         # Every referenced layout/id/resource must exist, or AAPT fails.
         for m in re.finditer(r"R\.layout\.(\w+)", src_k):
             if not (res / "layout" / f"{m.group(1)}.xml").exists():

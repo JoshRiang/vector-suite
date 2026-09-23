@@ -62,30 +62,101 @@ class Api {
 
   static const _timeout = Duration(seconds: 30);
 
+  /// Fallback attempts get a short budget.
+  ///
+  /// A private address that is not routable (phone off the home WiFi) can hang
+  /// until its connect timeout expires, so giving each fallback the full 30s
+  /// would freeze the UI for a minute and a half before showing an error.
+  /// Short attempts keep the worst case near the original single-request wait.
+  static const _fallbackTimeout = Duration(seconds: 6);
+
+  /// Candidate endpoints, tried in order.
+  ///
+  /// The shipped base URL is the only one that works from anywhere, but it can
+  /// be unreachable on a phone whose Tailscale DNS is up while the tunnel is
+  /// down, or behind a captive portal. A private-address fallback costs one
+  /// failed connect (milliseconds) and can rescue the app outright, so the app
+  /// is no longer betting the whole UI on a single path. Override the list at
+  /// build time with --dart-define=API_FALLBACKS=url1,url2.
+  static const _fallbacks = String.fromEnvironment(
+    'API_FALLBACKS',
+    defaultValue: 'http://10.11.11.235:8790,http://100.89.180.23:8790',
+  );
+
+  List<String> get _bases {
+    final list = <String>[
+      baseUrl,
+      for (final u in _fallbacks.split(','))
+        if (u.trim().isNotEmpty && u.trim() != baseUrl) u.trim(),
+    ];
+    return list;
+  }
+
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
         'X-User-Id': userId,
         if (apiKey.isNotEmpty) 'X-Api-Key': apiKey,
       };
 
+  /// True when a failure is a connection problem rather than a server reply, so
+  /// the caller knows a different endpoint is worth trying.
+  static bool _isUnreachable(Object e) =>
+      e is TimeoutException ||
+      e is SocketException ||
+      e is HandshakeException ||
+      e is http.ClientException;
+
   Future<dynamic> _send(String method, String path,
       {Map<String, dynamic>? body}) async {
-    final uri = Uri.parse('$baseUrl$path');
+    final bases = _bases;
+    Object? lastError;
+    for (var i = 0; i < bases.length; i++) {
+      try {
+        // Only the primary gets the full budget; fallbacks stay short so a
+        // dead private address cannot stall the screen.
+        final budget = i == 0 ? _timeout : _fallbackTimeout;
+        return await _sendTo(bases[i], method, path, body, budget);
+      } catch (e) {
+        // Only a transport failure justifies trying the next endpoint. A real
+        // HTTP error (401, 404, a rejected payload) means the server answered,
+        // so trying another address would just repeat it.
+        if (!_isUnreachable(e)) rethrow;
+        lastError = e;
+      }
+    }
+    // Every endpoint failed: report the last reason, which is the one most
+    // likely to reflect why the final attempt did not work.
+    final e = lastError;
+    if (e is TimeoutException) {
+      throw ApiException('The server took too long to answer. Tap to retry.',
+          offline: true);
+    }
+    if (e is HandshakeException) {
+      throw ApiException('Secure connection to the server failed.',
+          offline: true);
+    }
+    throw ApiException(
+        'Cannot reach the server. Check your connection.', offline: true);
+  }
+
+  Future<dynamic> _sendTo(String base, String method, String path,
+      Map<String, dynamic>? body, Duration budget) async {
+    final uri = Uri.parse('$base$path');
     try {
       late http.Response res;
       switch (method) {
         case 'GET':
-          res = await _http.get(uri, headers: _headers).timeout(_timeout);
+          res = await _http.get(uri, headers: _headers).timeout(budget);
         case 'POST':
           res = await _http
               .post(uri, headers: _headers, body: jsonEncode(body ?? {}))
-              .timeout(_timeout);
+              .timeout(budget);
         case 'PATCH':
           res = await _http
               .patch(uri, headers: _headers, body: jsonEncode(body ?? {}))
-              .timeout(_timeout);
+              .timeout(budget);
         case 'DELETE':
-          res = await _http.delete(uri, headers: _headers).timeout(_timeout);
+          res = await _http.delete(uri, headers: _headers).timeout(budget);
         default:
           throw ApiException('unsupported method $method');
       }
@@ -105,19 +176,15 @@ class Api {
       // `on ApiException` never fired, `_loading` stayed true and the app sat
       // on a blank screen with no message -- the user saw a white app while the
       // widget (whose Kotlin catches everything) correctly said "unreachable".
-      throw ApiException('The server took too long to answer. Tap to retry.',
-          offline: true);
+      rethrow;
     } on HandshakeException {
-      throw ApiException('Secure connection to the server failed.',
-          offline: true);
+      rethrow;
     } on SocketException {
-      throw ApiException(
-          'Cannot reach the server. Check your connection.', offline: true);
+      rethrow;
     } on http.ClientException {
       // http wraps TLS/DNS/connection failures in ClientException, which is NOT
       // a SocketException. Catching only SocketException let these escape.
-      throw ApiException(
-          'Cannot reach the server. Check your connection.', offline: true);
+      rethrow;
     } on FormatException {
       // A non-JSON body (a captive portal, a proxy error page) must surface as a
       // message, never as an unhandled crash.
