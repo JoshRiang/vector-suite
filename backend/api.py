@@ -85,6 +85,10 @@ def _days_ago_local(n: int) -> str:
     return (datetime.now(LOCAL_TZ).date() - timedelta(days=n)).isoformat()
 
 
+def _days_ahead_local(n: int) -> str:
+    return (datetime.now(LOCAL_TZ).date() + timedelta(days=n)).isoformat()
+
+
 def _db_headers() -> dict[str, str]:
     return {
         "apikey": SUPABASE_SERVICE_KEY,
@@ -263,6 +267,68 @@ def today_plan(user_id: str) -> dict[str, Any]:
         "done_today": done_today,
         "focus_minutes": focus_minutes,
         "sessions": len(sessions),
+    }
+
+
+def calendar_month(user_id: str, days: int = 45) -> dict[str, Any]:
+    """Which days have work, for a month grid.
+
+    The calendar widget previously derived its dots from /today alone, so it
+    could only ever mark TODAY: tomorrow's scheduled work was invisible, which
+    makes a calendar useless for planning. This returns the days that actually
+    carry work across a forward window.
+
+    Two real sources, kept separate because they mean different things:
+      scheduled - tasks with a scheduled_at date (the plan)
+      done      - tasks completed on that date (the record)
+    """
+    today = _today_local()
+    horizon = _days_ahead_local(days)
+
+    scheduled_rows = db_request("GET", "tasks", params={
+        "user_id": f"eq.{user_id}",
+        "scheduled_at": f"gte.{today}",
+        "select": "id,title,minutes,scheduled_at,status",
+        "order": "scheduled_at.asc",
+    })
+    # A same-day-only filter would silently drop everything if the store
+    # compares timestamps; filter the horizon in Python so it is exact.
+    scheduled = [r for r in scheduled_rows
+                 if (r.get("scheduled_at") or "")[:10] <= horizon]
+
+    done_rows = db_request("GET", "tasks", params={
+        "user_id": f"eq.{user_id}",
+        "status": "eq.done",
+        "completed_at": f"gte.{today}T00:00:00",
+        "select": "id,title,minutes,completed_at",
+    })
+    done = [r for r in done_rows
+            if (r.get("completed_at") or "")[:10] <= horizon]
+
+    def day_of(row: dict, field: str) -> str:
+        return (row.get(field) or "")[:10]
+
+    days_map: dict[str, dict[str, Any]] = {}
+    for r in scheduled:
+        d = day_of(r, "scheduled_at")
+        if not d:
+            continue
+        slot = days_map.setdefault(d, {"date": d, "scheduled": 0,
+                                       "done": 0, "minutes": 0})
+        slot["scheduled"] += 1
+        slot["minutes"] += r.get("minutes") or 0
+    for r in done:
+        d = day_of(r, "completed_at")
+        if not d:
+            continue
+        slot = days_map.setdefault(d, {"date": d, "scheduled": 0,
+                                       "done": 0, "minutes": 0})
+        slot["done"] += 1
+
+    return {
+        "today": today,
+        "horizon": horizon,
+        "days": [days_map[k] for k in sorted(days_map)],
     }
 
 
@@ -494,6 +560,9 @@ def route(method: str, path: str, body: dict, user_id: str | None,
                               params={"id": f"eq.{task_id}", "user_id": f"eq.{user_id}"},
                               body=patch)
             return _json_response(200, rows)
+
+        if p == "/calendar" and method == "GET":
+            return _json_response(200, calendar_month(user_id))
 
         if p == "/today" and method == "GET":
             return _json_response(200, today_plan(user_id))

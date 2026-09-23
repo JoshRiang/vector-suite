@@ -501,6 +501,25 @@ class {widget_class} : AppWidgetProvider() {{
                 planned += st.getJSONObject(i).optInt("minutes", 0)
             }}
             if (startableCount > 0) busy.add(today)
+
+            // Dot the days that actually carry SCHEDULED work, not just today.
+            // /today alone could only ever mark the current day, so tomorrow's
+            // plan was invisible and the grid was useless for planning.
+            val calJson = JSONObject(httpGet(context, "/calendar"))
+            val days = calJson.optJSONArray("days") ?: JSONArray()
+            for (i in 0 until days.length()) {{
+                val row = days.getJSONObject(i)
+                val date = row.optString("date", "")
+                // Only mark days in the month currently drawn, and parse the
+                // day-of-month strictly so a malformed date cannot add a dot
+                // to the wrong day.
+                if (date.length >= 10 && date.substring(0, 7) ==
+                    String.format("%04d-%02d", year, month + 1)) {{
+                    val d = date.substring(8, 10).toIntOrNull()
+                    if (d != null && d >= 1 && d <= 31) busy.add(d)
+                }}
+            }}
+
             val done = todayJson.optJSONArray("done_today") ?: JSONArray()
             for (i in 0 until done.length()) {{
                 val at = done.getJSONObject(i).optString("completed_at", "")
@@ -512,6 +531,9 @@ class {widget_class} : AppWidgetProvider() {{
         }} catch (e: Exception) {{
             // Offline: still draw the month, just without dots. A calendar that
             // vanishes when the network blips is worse than one with no dots.
+            // The exception is reported so a code bug is not silently dressed
+            // up as a network problem.
+            beacon(context, "widget-calendar", e.toString())
         }}
 
         val monthNames = arrayOf("January", "February", "March", "April", "May",
