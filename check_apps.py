@@ -293,6 +293,39 @@ def check(app: str, pkg: str) -> list[str]:
             errs.append("manifest missing android:usesCleartextTraffic (http "
                         "fallbacks would be blocked)")
 
+        # A widget that does network work MUST hold the broadcast open with
+        # goAsync(). onUpdate runs inside a broadcast, so a thread started there
+        # is killed the moment onUpdate returns: the request dies and the widget
+        # shows "Server unreachable" while the server is perfectly healthy. This
+        # is invisible to every other check because the code is valid Kotlin.
+        if ("httpGet(" in src_k or "httpPost(" in src_k):
+            # Match the CALL (`= goAsync()`), not the word: the explanatory
+            # comments mention goAsync(), so a substring check passed even after
+            # the real call was deleted - proven by a negative test.
+            if "= goAsync()" not in src_k:
+                errs.append(f"{cls}: does network work without goAsync() - the "
+                            f"fetch is killed when onUpdate returns and the "
+                            f"widget reports the server unreachable")
+            if "AppWidgetManager.ACTION_APPWIDGET_UPDATE" not in src_k:
+                errs.append(f"{cls}: no onReceive handling ACTION_APPWIDGET_"
+                            f"UPDATE, so the fetch has nothing keeping it alive")
+            if "thread { refresh(context, mgr, id) }" in src_k:
+                errs.append(f"{cls}: onUpdate starts a bare refresh thread "
+                            f"(must run under goAsync instead)")
+
+        # A catch-all that maps EVERY exception to "Server unreachable" hides
+        # code bugs behind a network diagnosis. That cost a long hunt for a
+        # network fault that did not exist while the app talked to the same URL
+        # happily. The offline message must be gated on a transport check.
+        #
+        # Match the TYPE CHECK specifically ("is java.io.IOException"), not the
+        # bare class name: IOException also appears in the request's own catch
+        # clauses, so a looser test passes even when the gate is removed.
+        if "widget_offline" in src_k and \
+                not re.search(r"\bis\s+java\.io\.IOException\b", src_k):
+            errs.append(f"{cls}: shows the offline message for any exception - "
+                        f"a render/parse bug would look like a dead server")
+
         # Every referenced layout/id/resource must exist, or AAPT fails.
         for m in re.finditer(r"R\.layout\.(\w+)", src_k):
             if not (res / "layout" / f"{m.group(1)}.xml").exists():

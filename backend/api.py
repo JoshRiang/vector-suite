@@ -557,6 +557,24 @@ def build_wsgi_app():
                     body[k] = v[0] if v else ""
 
         status, headers, payload = route(method, path, body, user_id, api_key)
+
+        # Log every request with its outcome.
+        #
+        # The app and the widget use the same URL and key, so a failure that
+        # affects only one of them cannot be diagnosed from this side without
+        # knowing whether the request arrived at all and what it was answered.
+        # Never records the key itself - only whether one was supplied.
+        try:
+            import time as _time
+            ua = (environ.get("HTTP_USER_AGENT") or "-")[:60]
+            with open("/home/josh/vector_suite/data/requests.log", "a") as f:
+                f.write(f"{_time.strftime('%Y-%m-%d %H:%M:%S')} "
+                        f"{method} {path} -> {status} "
+                        f"key={'y' if api_key else 'n'} "
+                        f"user={user_id or '-'} ua={ua}\n")
+        except OSError:
+            pass
+
         start_response(f"{status} OK", list(headers.items()))
         return [payload]
 

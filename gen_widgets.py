@@ -72,6 +72,27 @@ COMMON = r'''
     /** Group digits so a 7-figure amount stays readable in a narrow widget. */
     private fun fmt(v: Double): String = String.format("%,.0f", v)
 
+    /**
+     * Endpoints tried in order, after the configured one.
+     *
+     * The public URL is the only endpoint that works away from home, but it can
+     * be unreachable while a private address still answers -- Tailscale DNS up
+     * with the tunnel down, a captive portal, a slow cold start. The app has
+     * this failover and works; the widget did not, which is why the app
+     * recovered while the widget kept reporting "Server unreachable".
+     */
+    private val FALLBACK_BASES = listOf(
+        "http://10.11.11.235:8790",
+        "http://100.89.180.23:8790",
+    )
+
+    private fun candidateBases(context: Context): List<String> {
+        val primary = context.getString(R.string.vector_api_base).trimEnd('/')
+        return (listOf(primary) + FALLBACK_BASES)
+            .map { it.trimEnd('/') }
+            .distinct()
+    }
+
     private fun httpGet(context: Context, path: String): String =
         http(context, "GET", path, null)
 
@@ -79,18 +100,37 @@ COMMON = r'''
         http(context, "POST", path, "{}")
 
     /**
-     * Single HTTP entry point. A widget provider runs on the main thread, so
-     * every caller is responsible for being off it.
+     * HTTP entry point with endpoint failover. A widget provider runs on the
+     * main thread, so every caller is responsible for being off it.
+     *
+     * Only a transport failure (IOException) moves on to the next endpoint: if
+     * the server answered at all, another address would answer the same way.
      */
     private fun http(context: Context, method: String, path: String,
                      body: String?): String {
-        val base = context.getString(R.string.vector_api_base).trimEnd('/')
+        var lastError: java.io.IOException? = null
+        for (base in candidateBases(context)) {
+            try {
+                return httpOnce(context, base, method, path, body)
+            } catch (e: java.io.IOException) {
+                lastError = e
+            }
+        }
+        throw java.io.IOException(
+            "no VECTOR endpoint reachable: " + (lastError?.message ?: "unknown"))
+    }
+
+    /** One request against one base. */
+    private fun httpOnce(context: Context, base: String, method: String,
+                         path: String, body: String?): String {
         val userId = context.getString(R.string.vector_user_id)
         val key = context.getString(R.string.vector_api_key)
         val conn = (URL(base + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
-            connectTimeout = 8000
-            readTimeout = 8000
+            // 5s, not 8s: an appwidget update is time-limited, and a dead
+            // private address must not eat the budget before the live one.
+            connectTimeout = 5000
+            readTimeout = 5000
             setRequestProperty("X-User-Id", userId)
             setRequestProperty("Accept", "application/json")
             if (key.isNotEmpty()) setRequestProperty("X-Api-Key", key)
@@ -108,6 +148,38 @@ COMMON = r'''
             return stream?.bufferedReader()?.use { it.readText() } ?: ""
         } finally {
             conn.disconnect()
+        }
+    }
+
+    /**
+     * Report a widget event to the server.
+     *
+     * The widget shows "Server unreachable" for every exception it catches,
+     * which hides a code bug behind a network diagnosis. Beaconing the real
+     * exception is the only way to tell the two apart on a device. Runs
+     * SYNCHRONOUSLY: every caller is already off the main thread, and a nested
+     * thread could outlive goAsync()'s finisher and be killed before sending.
+     */
+    private fun beacon(context: Context, stage: String, detail: String) {
+        try {
+            val base = context.getString(R.string.vector_api_base).trimEnd('/')
+            val url = java.net.URL(base + "/diag?stage=" +
+                java.net.URLEncoder.encode(stage, "UTF-8") + "&detail=" +
+                java.net.URLEncoder.encode(detail.take(500), "UTF-8"))
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 4000
+                readTimeout = 4000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("X-User-Id",
+                    context.getString(R.string.vector_user_id))
+            }
+            conn.outputStream.use { it.write("{}".toByteArray()) }
+            conn.responseCode
+            conn.disconnect()
+        } catch (e: Exception) {
+            // Never let the diagnostic become the failure.
         }
     }
 
@@ -213,7 +285,9 @@ class {widget_class} : AppWidgetProvider() {{
             views.setTextViewText(R.id.widget_primary,
                 context.getString(R.string.widget_loading))
             mgr.updateAppWidget(id, views)
-            thread {{ refresh(context, mgr, id) }}
+            // The fetch runs in onReceive under goAsync(): a thread started
+            // here can be killed the moment onUpdate returns, which made
+            // every fetch fail and the widget show "Server unreachable".
         }}
     }}
 
@@ -224,6 +298,26 @@ class {widget_class} : AppWidgetProvider() {{
      */
     override fun onReceive(context: Context, intent: Intent) {{
         super.onReceive(context, intent)
+
+        if (intent.action == AppWidgetManager.ACTION_APPWIDGET_UPDATE) {{
+            // goAsync() keeps this broadcast alive until finish() is called.
+            // Without it the process can be killed as soon as onUpdate returns,
+            // so the in-flight request dies and the widget reports the server
+            // unreachable even though the server is perfectly healthy.
+            val pending = goAsync()
+            val mgr = AppWidgetManager.getInstance(context)
+            val ids = mgr.getAppWidgetIds(
+                android.content.ComponentName(context, javaClass))
+            thread {{
+                try {{
+                    for (id in ids) refresh(context, mgr, id)
+                }} finally {{
+                    pending.finish()
+                }}
+            }}
+            return
+        }}
+
         if (intent.action != ACTION_TOGGLE) return
         val taskId = intent.getStringExtra(EXTRA_TASK_ID) ?: return
         val done = intent.getBooleanExtra(EXTRA_DONE, true)
@@ -284,13 +378,23 @@ class {widget_class} : AppWidgetProvider() {{
             views.setProgressBar(R.id.widget_progress, 100, pct, false)
             views.setTextViewText(R.id.widget_secondary,
                 if (total > 0) pct.toString() + "% of today complete" else "")
+            beacon(context, "widget-ok", "shown=" + shown + " done=" + done)
         }} catch (e: Exception) {{
             for (i in 0 until 5) bindRow(context, views, i, null, "", "", false)
             views.setViewVisibility(R.id.widget_empty, android.view.View.VISIBLE)
+            // Only a transport failure means the server is unreachable. Any
+            // other exception is a bug in this widget, and reporting it as
+            // "Server unreachable" sends the hunt after a network fault that
+            // does not exist while the app talks to the same URL happily.
+            val offline = e is java.io.IOException
             views.setTextViewText(R.id.widget_empty,
-                context.getString(R.string.widget_offline))
+                if (offline) context.getString(R.string.widget_offline)
+                else "Widget bug: " + (e.message ?: e.javaClass.simpleName))
             views.setTextViewText(R.id.widget_badge, "")
             views.setTextViewText(R.id.widget_secondary, "")
+            beacon(context, if (offline) "widget-offline" else "widget-bug",
+                e.javaClass.name + ": " + (e.message ?: "") +
+                    " | " + e.stackTrace.take(4).joinToString(" <- "))
         }}
 
         // "Ask Hermes" opens the app, where a goal becomes a plan.
@@ -345,7 +449,32 @@ class {widget_class} : AppWidgetProvider() {{
             views.setTextViewText(R.id.widget_primary,
                 context.getString(R.string.widget_loading))
             mgr.updateAppWidget(id, views)
-            thread {{ refresh(context, mgr, id) }}
+            // The fetch runs in onReceive under goAsync(): a thread started
+            // here can be killed the moment onUpdate returns, which made
+            // every fetch fail and the widget show "Server unreachable".
+        }}
+    }}
+
+
+    /**
+     * The fetch runs here, not in onUpdate, so that goAsync() can hold the
+     * broadcast open. A thread started from onUpdate is killed with the process
+     * as soon as onUpdate returns, which made the request die and the widget
+     * report "Server unreachable" while the server was healthy.
+     */
+    override fun onReceive(context: Context, intent: Intent) {{
+        super.onReceive(context, intent)
+        if (intent.action != AppWidgetManager.ACTION_APPWIDGET_UPDATE) return
+        val pending = goAsync()
+        val mgr = AppWidgetManager.getInstance(context)
+        val ids = mgr.getAppWidgetIds(
+            android.content.ComponentName(context, javaClass))
+        thread {{
+            try {{
+                for (id in ids) refresh(context, mgr, id)
+            }} finally {{
+                pending.finish()
+            }}
         }}
     }}
 
@@ -470,7 +599,32 @@ class {widget_class} : AppWidgetProvider() {{
             views.setTextViewText(R.id.widget_primary,
                 context.getString(R.string.widget_loading))
             mgr.updateAppWidget(id, views)
-            thread {{ refresh(context, mgr, id) }}
+            // The fetch runs in onReceive under goAsync(): a thread started
+            // here can be killed the moment onUpdate returns, which made
+            // every fetch fail and the widget show "Server unreachable".
+        }}
+    }}
+
+
+    /**
+     * The fetch runs here, not in onUpdate, so that goAsync() can hold the
+     * broadcast open. A thread started from onUpdate is killed with the process
+     * as soon as onUpdate returns, which made the request die and the widget
+     * report "Server unreachable" while the server was healthy.
+     */
+    override fun onReceive(context: Context, intent: Intent) {{
+        super.onReceive(context, intent)
+        if (intent.action != AppWidgetManager.ACTION_APPWIDGET_UPDATE) return
+        val pending = goAsync()
+        val mgr = AppWidgetManager.getInstance(context)
+        val ids = mgr.getAppWidgetIds(
+            android.content.ComponentName(context, javaClass))
+        thread {{
+            try {{
+                for (id in ids) refresh(context, mgr, id)
+            }} finally {{
+                pending.finish()
+            }}
         }}
     }}
 
@@ -488,10 +642,14 @@ class {widget_class} : AppWidgetProvider() {{
                 else fmt(free) + " " + currency + " free today")
             views.setTextViewText(R.id.widget_badge, "RUNWAY")
         }} catch (e: Exception) {{
+            // Only a transport failure means the server is unreachable; any
+            // other exception is a bug here and must not be reported as one.
+            val offline = e is java.io.IOException
             views.setTextViewText(R.id.widget_primary,
-                context.getString(R.string.widget_offline))
+                if (offline) context.getString(R.string.widget_offline)
+                else "Widget bug: " + (e.message ?: e.javaClass.simpleName))
             views.setTextViewText(R.id.widget_secondary,
-                context.getString(R.string.widget_offline_hint))
+                if (offline) context.getString(R.string.widget_offline_hint) else "")
             views.setTextViewText(R.id.widget_badge, "")
         }}
         val open = Intent(context, MainActivity::class.java)
