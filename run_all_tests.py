@@ -30,6 +30,7 @@ SUITES = [
     ("daily brief",   ROOT / "backend/test_daily_brief.py"),
     ("flutter apps",  ROOT / "check_apps.py"),
     ("calendar grid", ROOT / "verify_calendar_grid.py"),
+    ("late final", ROOT / "check_late_final.py"),
     ("endpoint fallback", ROOT / "verify_fallback.py"),
     ("beacon transport", ROOT / "verify_beacon_transport.py"),
     # Needs the live API; skips itself cleanly if unreachable. This is the only

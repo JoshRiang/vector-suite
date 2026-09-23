@@ -59,11 +59,16 @@ def main() -> int:
         fails.append(f"stage lost with an empty body: {line!r}")
     print(f"  2. query string only    -> {line.strip()}")
 
-    # 3. the stage must never be recorded as '?'
-    if "stage=?" in LOG.read_text():
-        fails.append("a beacon was still logged with stage=?")
+    # 3. The stages THIS test sent must be recorded faithfully. Scanning the
+    #    whole log for "stage=?" is wrong: an older app build legitimately wrote
+    #    those lines, so a global scan fails for reasons unrelated to this test.
+    #    Check only the lines this run appended.
+    new_lines = LOG.read_text().splitlines()[before:]
+    bad = [l for l in new_lines if "stage=?" in l]
+    if bad:
+        fails.append(f"new beacon lines logged with stage=?: {bad}")
     else:
-        print("  3. no stage=? in the log")
+        print(f"  3. all {len(new_lines)} new line(s) carry a real stage")
 
     print()
     if fails:
