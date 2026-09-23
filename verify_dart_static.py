@@ -106,6 +106,49 @@ def guarded_casts(code: str, kind: str) -> list[str]:
     return out
 
 
+def class_bodies(code: str) -> list[tuple[str, int, int]]:
+    """Return (class_name, body_start, body_end) for each top-level class."""
+    out = []
+    for m in re.finditer(r"^class\s+(\w+)", code, re.M):
+        start = code.find("{", m.end())
+        if start == -1:
+            continue
+        depth = 0
+        i = start
+        while i < len(code):
+            if code[i] == "{":
+                depth += 1
+            elif code[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        out.append((m.group(1), start, i))
+    return out
+
+
+def misplaced_members(code: str) -> list[str]:
+    """Find class-scoped `static const` names used OUTSIDE their own class.
+
+    This is a real CI failure that cost a build: `static const _noListId` was
+    declared in _HomePageState but referenced from _TaskDetailPageState, which
+    Dart rejects with "The getter '_noListId' isn't defined for the class".
+    Nothing on this machine can compile Dart, so without this check the mistake
+    is only discovered by a full CI round trip.
+    """
+    problems = []
+    bodies = class_bodies(code)
+    for name, start, end in bodies:
+        body = code[start:end]
+        for m in re.finditer(r"static\s+const\s+[\w<>?,\s]+\s+(\w+)\s*=", body):
+            member = m.group(1)
+            # Search for uses outside this class body.
+            outside = code[:start] + code[end:]
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(member)}\b", outside):
+                problems.append(f"{member} declared in {name} but used elsewhere")
+    return problems
+
+
 CHECKS = [
     # (name, regex, must_be_absent, why)
     ("material import", r"import\s+'package:flutter/material\.dart'", True,
@@ -180,6 +223,14 @@ def main() -> int:
                 fails += 1
             else:
                 print(f"  ok   no unguarded 'as {kind}'")
+
+        misplaced = misplaced_members(code)
+        if misplaced:
+            for prob in misplaced:
+                print(f"  FAIL out-of-scope member: {prob}")
+            fails += 1
+        else:
+            print("  ok   no out-of-scope class members")
 
         # .first must be guarded nearby.
         for m in re.finditer(r"\.first\b", code):
