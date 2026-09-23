@@ -332,6 +332,68 @@ def calendar_month(user_id: str, days: int = 45) -> dict[str, Any]:
     }
 
 
+def calendar_range(user_id: str, start: str | None = None,
+                   end: str | None = None) -> dict[str, Any]:
+    """Every item in a date range, for a real month/agenda calendar.
+
+    Unlike /calendar (which only reports which days have work), this returns the
+    ITEMS with their times, locations and all-day flag, so the app can render a
+    day view and a month grid the way a calendar is expected to behave.
+    """
+    today = _today_local()
+    start_date = start or _days_ago_local(31)
+    end_date = end or _days_ahead_local(62)
+
+    # Validate: a bad range must not silently return the wrong window.
+    try:
+        s = datetime.strptime(start_date[:10], "%Y-%m-%d").date()
+        e = datetime.strptime(end_date[:10], "%Y-%m-%d").date()
+    except ValueError:
+        start_date, end_date = _days_ago_local(31), _days_ahead_local(62)
+        s = datetime.strptime(start_date, "%Y-%m-%d").date()
+        e = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if e < s:
+        s, e = e, s
+
+    rows = db_request("GET", "tasks", params={
+        "user_id": f"eq.{user_id}",
+        "select": "id,title,why,minutes,status,priority,scheduled_at,"
+                  "completed_at,all_day,location,notes,goal_id,color",
+    }) or []
+
+    items = []
+    for r in rows:
+        when = (r.get("scheduled_at") or "")[:10]
+        if when:
+            try:
+                d = datetime.strptime(when, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if not (s <= d <= e):
+                continue
+        else:
+            # Undated work is still real work; surface it in the window rather
+            # than hiding it, but only when the window includes today.
+            if not (s <= datetime.strptime(today, "%Y-%m-%d").date() <= e):
+                continue
+        items.append(r)
+
+    items.sort(key=lambda r: (r.get("scheduled_at") or "9999", r.get("priority") or 3))
+    by_day: dict[str, list] = {}
+    for r in items:
+        day = (r.get("scheduled_at") or today)[:10]
+        by_day.setdefault(day, []).append(r)
+
+    return {
+        "today": today,
+        "start": s.isoformat(),
+        "end": e.isoformat(),
+        "items": items,
+        "days": [{"date": d, "count": len(by_day[d]), "items": by_day[d]}
+                 for d in sorted(by_day)],
+    }
+
+
 def productivity(user_id: str, days: int = 14) -> dict[str, Any]:
     """Planned-vs-actual over a window. Computed from logs, never a counter."""
     since = _days_ago_local(days)
@@ -407,9 +469,11 @@ def _json_response(status: int, payload: Any) -> tuple[int, dict, bytes]:
 
 
 def route(method: str, path: str, body: dict, user_id: str | None,
-          api_key: str | None = None) -> tuple[int, dict, bytes]:
+          api_key: str | None = None,
+          query: dict | None = None) -> tuple[int, dict, bytes]:
     """Pure routing function -- testable without a live socket."""
     p = path.rstrip("/") or "/"
+    query = query or {}
 
     if p == "/health" and method == "GET":
         # Deliberately unauthenticated: a health probe that needs a secret is
@@ -561,8 +625,37 @@ def route(method: str, path: str, body: dict, user_id: str | None,
                               body=patch)
             return _json_response(200, rows)
 
+        if p == "/tasks" and method == "DELETE":
+            task_id = body.get("id")
+            if not task_id:
+                return _json_response(400, {"error": "id_required"})
+            # Scope by user so an id from another account cannot be removed.
+            db_request("DELETE", "tasks",
+                       params={"id": f"eq.{task_id}",
+                               "user_id": f"eq.{user_id}"})
+            return _json_response(200, {"ok": True, "id": task_id})
+
         if p == "/calendar" and method == "GET":
             return _json_response(200, calendar_month(user_id))
+
+        # Full items for a date range: what a month/day calendar actually needs.
+        if p == "/calendar/range" and method == "GET":
+            return _json_response(200, calendar_range(
+                user_id, query.get("start"), query.get("end")))
+
+        # Natural-language instruction -> real changes. The model returns a
+        # validated operation list, never SQL, so this is a command console
+        # rather than a chatbot: it reports what it actually changed.
+        if p == "/command" and method == "POST":
+            instruction = body.get("instruction") or body.get("text")
+            if not isinstance(instruction, str) or not instruction.strip():
+                return _json_response(400, {"error": "instruction_required"})
+            import commands
+            return _json_response(200, commands.handle(user_id, instruction))
+
+        if p == "/commands" and method == "GET":
+            import commands
+            return _json_response(200, commands.history(user_id))
 
         if p == "/today" and method == "GET":
             return _json_response(200, today_plan(user_id))
@@ -619,13 +712,16 @@ def build_wsgi_app():
         # arrived with an empty body and logged "stage=?", which is useless
         # exactly when it matters most.
         qs = environ.get("QUERY_STRING") or ""
+        query_params: dict = {}
         if qs:
             from urllib.parse import parse_qs
             for k, v in parse_qs(qs).items():
+                query_params[k] = v[0] if v else ""
                 if k not in body:
-                    body[k] = v[0] if v else ""
+                    body[k] = query_params[k]
 
-        status, headers, payload = route(method, path, body, user_id, api_key)
+        status, headers, payload = route(method, path, body, user_id, api_key,
+                                         query=query_params)
 
         # Log every request with its outcome.
         #

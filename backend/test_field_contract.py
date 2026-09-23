@@ -53,6 +53,11 @@ ALLOWED = {
     "blocked_by_title", "startable_flag",
     # read off an ERROR body, which by definition is not in a success payload
     "error",
+    # "task" is a shape PROBE, not a field read: upsertTask() checks
+    # m.containsKey('task') to tolerate a backend that wraps the created row.
+    # Verified live that POST /tasks returns the row flat, so no response ever
+    # carries this key and the wrapper branch is simply never taken.
+    "task",
 }
 
 

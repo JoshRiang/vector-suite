@@ -181,7 +181,12 @@ def _split_statements(script: str) -> list[str]:
 
         if ch == ";":
             s = "".join(buf).strip()
-            if s:
+            # A chunk made only of comments/whitespace is not a statement.
+            # A semicolon inside a COMMENT splits the script here, and psycopg
+            # rejects an empty query, so without this check one stray semicolon
+            # in a comment breaks the entire schema load.
+            if s and [ln for ln in s.splitlines()
+                      if ln.strip() and not ln.strip().startswith("--")]:
                 stmts.append(s)
             buf = []
             i += 1
@@ -191,7 +196,8 @@ def _split_statements(script: str) -> list[str]:
         i += 1
 
     tail = "".join(buf).strip()
-    if tail:
+    if tail and [ln for ln in tail.splitlines()
+                 if ln.strip() and not ln.strip().startswith("--")]:
         stmts.append(tail)
     return stmts
 

@@ -96,6 +96,32 @@ create table if not exists expenses (
 create index if not exists expenses_user_date_idx on expenses(user_id, spent_on);
 
 -- ============================================================================
+-- ============================================================================
+-- Chat / command console
+-- ============================================================================
+-- Records every instruction the user types and the reply, so a change made by
+-- an instruction is traceable back to the words that caused it.
+create table if not exists chat_messages (
+  id         text primary key,
+  user_id    text not null,
+  role       text not null,
+  content    text not null,
+  created_at text not null
+);
+create index if not exists chat_user_created_idx on chat_messages(user_id, created_at);
+
+-- Additive columns for tables that predate them. `create table if not exists`
+-- does NOT add columns to an existing table, so each new column needs an
+-- explicit ALTER. The if-not-exists form keeps this safe to re-run.
+alter table tasks add column if not exists all_day   integer not null default 0;
+alter table tasks add column if not exists location  text;
+alter table tasks add column if not exists notes     text;
+alter table tasks add column if not exists repeat    text;
+alter table tasks add column if not exists reminders text;
+alter table tasks add column if not exists color     text;
+
+alter table chat_messages enable row level security;
+
 -- Access control
 -- ============================================================================
 -- The service connects as the postgres role, which bypasses RLS. RLS is enabled

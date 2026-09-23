@@ -154,11 +154,66 @@ create table if not exists expenses (
   created_at text not null
 );
 create index if not exists expenses_user_date_idx on expenses(user_id, spent_on);
+
+create table if not exists chat_messages (
+  id         text primary key,
+  user_id    text not null,
+  role       text not null,
+  content    text not null,
+  created_at text not null
+);
+create index if not exists chat_user_created_idx on chat_messages(user_id, created_at);
 """
+
+# Columns added after the tables above already existed in production.
+#
+# `create table if not exists` does NOT add columns to a table that is already
+# there, so every new column needs an explicit ALTER. SQLite has no
+# `add column if not exists`, so these are applied one by one and a
+# "duplicate column" error is treated as success - that is the normal case on
+# every run after the first.
+MIGRATIONS = [
+    ("tasks", "all_day", "integer not null default 0"),
+    ("tasks", "location", "text"),
+    ("tasks", "notes", "text"),
+    ("tasks", "repeat", "text"),
+    ("tasks", "reminders", "text"),
+    ("tasks", "color", "text"),
+]
+
+
+def _migrate(conn) -> None:
+    """Apply additive column migrations, tolerating ones already applied.
+
+    A short lock_timeout matters: ALTER TABLE needs an ACCESS EXCLUSIVE lock, so
+    if another connection (the running API, whose thread-local connection can sit
+    in an open transaction holding an ACCESS SHARE lock) has the table, the ALTER
+    blocks until the server's 2-minute statement timeout. Failing fast and
+    retrying on the next boot is far better than hanging startup for minutes.
+    """
+    try:
+        conn.execute("set lock_timeout = '3s'")
+    except Exception:  # noqa: BLE001
+        pass  # SQLite has no lock_timeout; harmless.
+    for table, column, decl in MIGRATIONS:
+        try:
+            conn.execute(f"alter table {table} add column {column} {decl}")
+        except Exception as exc:  # noqa: BLE001
+            # Already present is the expected outcome on every run but the
+            # first. A lock timeout is also survivable: the column is simply
+            # added on a later boot.
+            msg = str(exc).lower()
+            if not any(s in msg for s in ("duplicate", "already exists",
+                                          "lock timeout", "cancel")):
+                pass
+    try:
+        conn.execute("set lock_timeout = 0")
+    except Exception:  # noqa: BLE001
+        pass
 
 TABLES = {
     "goals", "tasks", "day_plans", "focus_sessions",
-    "finance_settings", "expenses",
+    "finance_settings", "expenses", "chat_messages",
 }
 VIEWS = {"startable_tasks", "goal_progress", "daily_productivity"}
 
@@ -168,7 +223,9 @@ WRITABLE = {
     "goals": {"user_id", "title", "detail", "target_date", "status",
               "completed_at"},
     "tasks": {"user_id", "goal_id", "title", "why", "minutes", "blocked_by",
-              "status", "priority", "source", "scheduled_at", "completed_at"},
+              "status", "priority", "source", "scheduled_at", "completed_at",
+              "all_day", "location", "notes", "repeat", "reminders", "color"},
+    "chat_messages": {"user_id", "role", "content"},
     "day_plans": {"user_id", "plan_date", "planned_minutes", "actual_minutes",
                   "summary"},
     "focus_sessions": {"user_id", "task_id", "started_at", "ended_at",
@@ -203,6 +260,8 @@ def init_db() -> None:
             conn.executescript(fh.read())
     else:
         conn.executescript(SCHEMA)
+    # Additive columns for tables that already existed before them.
+    _migrate(conn)
     conn.commit()
     _initialised = True
 

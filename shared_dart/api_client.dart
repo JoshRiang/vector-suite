@@ -309,6 +309,80 @@ class Api {
         if (note != null) 'note': note,
         if (category != null) 'category': category,
       });
+
+  // ---------------------------------------------------------------------
+  // Calendar range: every item in a window, with times and all-day flags.
+  // This is what a real month/day calendar renders; /today only describes the
+  // current day and cannot show a week.
+  // ---------------------------------------------------------------------
+  Future<Map<String, dynamic>> calendarRange({String? start, String? end}) {
+    final q = <String>[
+      if (start != null) 'start=$start',
+      if (end != null) 'end=$end',
+    ];
+    final suffix = q.isEmpty ? '' : '?${q.join('&')}';
+    return _send('GET', '/calendar/range$suffix').then(Safe.map);
+  }
+
+  /// Create or move one calendar item. Only the fields passed are sent.
+  Future<Map<String, dynamic>> upsertTask({
+    String? id,
+    String? title,
+    String? scheduledAt,
+    int? minutes,
+    bool? allDay,
+    String? location,
+    String? notes,
+    String? goalId,
+    int? priority,
+    String? status,
+  }) async {
+    final body = <String, dynamic>{
+      if (title != null) 'title': title,
+      if (scheduledAt != null) 'scheduled_at': scheduledAt,
+      if (minutes != null) 'minutes': minutes,
+      if (allDay != null) 'all_day': allDay,
+      if (location != null) 'location': location,
+      if (notes != null) 'notes': notes,
+      if (goalId != null) 'goal_id': goalId,
+      if (priority != null) 'priority': priority,
+      if (status != null) 'status': status,
+    };
+    if (id == null) {
+      // POST /tasks returns the created row FLAT (verified live: a dict with
+      // id/title/... at the top level), not wrapped in a "task" key. Tolerate
+      // the wrapped shape too so a change of backend cannot break create.
+      final res = await _send('POST', '/tasks', body: body);
+      if (res is List && res.isNotEmpty) return Safe.map(res.first);
+      final m = Safe.map(res);
+      return m.containsKey('task') ? Safe.map(m['task']) : m;
+    }
+    body['id'] = id;
+    final res = await _send('PATCH', '/tasks', body: body);
+    if (res is List && res.isNotEmpty) return Safe.map(res.first);
+    final m = Safe.map(res);
+    return m.containsKey('task') ? Safe.map(m['task']) : m;
+  }
+
+  /// Delete one calendar item.
+  ///
+  /// There is no DELETE route for tasks, so this cannot be faked with a status
+  /// change: writing an invented status would leave a row the UI still has to
+  /// filter out. The server route is added alongside this method.
+  Future<void> deleteTask(String id) =>
+      _send('DELETE', '/tasks', body: {'id': id});
+
+  /// Send a natural-language instruction to the server-side planner.
+  ///
+  /// This is a command console, not a chat: the server turns the instruction
+  /// into validated calendar/task operations and reports what it changed. No
+  /// model key lives in the app, so this is the only way the app reaches it.
+  Future<Map<String, dynamic>> command(String instruction) async =>
+      Safe.map(await _send('POST', '/command',
+          body: {'instruction': instruction}));
+
+  Future<List<Map<String, dynamic>>> commandHistory() async =>
+      Safe.mapList(await _send('GET', '/commands'));
 }
 
 class ApiException implements Exception {
