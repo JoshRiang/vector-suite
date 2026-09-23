@@ -40,7 +40,19 @@ from typing import Any
 
 DB_PATH = os.environ.get("VECTOR_DB", "/home/josh/vector_suite/data/vector.db")
 
+# Postgres (Supabase) takes precedence when a DSN is configured. Unset, the
+# store falls back to local SQLite so the apps work with no cloud dependency.
+# Both paths run this same query builder, so tests cover either engine.
+PG_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "pg_schema.sql")
+
 _local = threading.local()
+
+
+def _dsn() -> str:
+    """Connection string, if a Postgres backend is configured."""
+    return (os.environ.get("DATABASE_URL", "")
+            or os.environ.get("SUPABASE_DB_URL", "")).strip()
 
 
 def _now() -> str:
@@ -50,15 +62,21 @@ def _now() -> str:
 # ---------------------------------------------------------------------------
 # Connection / schema
 # ---------------------------------------------------------------------------
-def _connect() -> sqlite3.Connection:
-    """One connection per thread; sqlite objects are not thread-safe."""
+def _connect():
+    """One connection per thread; neither sqlite nor psycopg objects are
+    safe to share across threads."""
     conn = getattr(_local, "conn", None)
     if conn is None:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        conn = sqlite3.connect(DB_PATH, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        dsn = _dsn()
+        if dsn:
+            import pgcompat
+            conn = pgcompat.connect(dsn)
+        else:
+            os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+            conn = sqlite3.connect(DB_PATH, timeout=30)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
         _local.conn = conn
     return conn
 
@@ -178,7 +196,13 @@ def init_db() -> None:
     if _initialised:
         return
     conn = _connect()
-    conn.executescript(SCHEMA)
+    if _dsn():
+        # Postgres: run the mirrored schema. Kept as a separate file so the
+        # exact DDL applied to the cloud database is reviewable in one place.
+        with open(PG_SCHEMA_PATH, encoding="utf-8") as fh:
+            conn.executescript(fh.read())
+    else:
+        conn.executescript(SCHEMA)
     conn.commit()
     _initialised = True
 
@@ -324,7 +348,7 @@ def _view_rows(name: str, user_id: str | None) -> list[dict]:
         select user_id, substr(started_at,1,10) as day,
                count(*) as sessions,
                coalesce(sum(minutes),0) as minutes,
-               coalesce(sum(case when completed then 1 else 0 end),0) as completed
+               coalesce(sum(case when completed = 1 then 1 else 0 end),0) as completed
         from focus_sessions
         """
         args = []

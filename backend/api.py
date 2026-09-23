@@ -289,10 +289,18 @@ def route(method: str, path: str, body: dict, user_id: str | None,
     if p == "/health" and method == "GET":
         # Deliberately unauthenticated: a health probe that needs a secret is
         # useless for uptime monitoring, and it exposes no user data.
+        # Report the backend that is ACTUALLY in use, so a silent fallback to
+        # SQLite (e.g. a DSN that failed to load) is visible rather than
+        # looking healthy while the apps quietly write to the wrong place.
+        if store._dsn():
+            db = "postgres"
+        elif SUPABASE_URL and SUPABASE_SERVICE_KEY:
+            db = "supabase-rest"
+        else:
+            db = "local-sqlite"
         return _json_response(200, {
             "ok": True,
-            "db": "supabase" if (SUPABASE_URL and SUPABASE_SERVICE_KEY)
-                  else "local-sqlite",
+            "db": db,
             "auth": bool(API_KEY),
             "llm": bool(os.environ.get("LLM_API_KEY") or os.environ.get("LLM_MODEL")
                         or os.path.exists(os.path.expanduser("~/.hermes/config.yaml"))),

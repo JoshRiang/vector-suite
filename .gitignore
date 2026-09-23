@@ -6,3 +6,8 @@ __pycache__/
 vector-tasks/
 vector-calendar/
 vector-finance/
+
+# Never commit secrets or throwaway envs
+venv/
+backend/.sbpw_probe
+*.sbpw*

@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""
-Run every VECTOR Suite check in one command.
+"""Run every VECTOR Suite check in one command.
 
 Backend (pure logic, no network):   store, api routing, decomposition, timezone
 Apps (structural, no toolchain):    check_apps.py
+Postgres parity (only if a DSN is set): store behaviour + dialect differences
 
 Exit code is non-zero if anything fails, so CI or a shell `&&` chain can gate
-on it. This exists because the suite is now four files and running them by
+on it. This exists because the suite is now several files and running them by
 memory is how a broken one gets skipped.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,10 +28,29 @@ SUITES = [
     ("flutter apps",  ROOT / "check_apps.py"),
 ]
 
+# These need a live Postgres. They are skipped (not failed) without a DSN so the
+# suite stays runnable offline, but they run whenever one is configured - which
+# is exactly when a dialect regression would otherwise reach production.
+PG_SUITES = [
+    ("postgres parity",  ROOT / "backend/test_postgres.py"),
+    ("postgres dialect", ROOT / "backend/test_pg_dialect.py"),
+]
+
+
+def _dsn() -> str:
+    return (os.environ.get("DATABASE_URL")
+            or os.environ.get("SUPABASE_DB_URL") or "").strip()
+
 
 def main() -> int:
     failed: list[str] = []
-    for name, path in SUITES:
+    suites = list(SUITES)
+    if _dsn():
+        suites += PG_SUITES
+    else:
+        print("note: no DATABASE_URL set - skipping Postgres parity suites\n")
+
+    for name, path in suites:
         print("=" * 62)
         print(f"  {name}  ({path.name})")
         print("=" * 62)

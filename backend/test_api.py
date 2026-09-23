@@ -10,6 +10,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Hermetic: this suite must not touch a live database. api.db_request falls
+# through to store, which now connects to Postgres when DATABASE_URL is set
+# (the Supabase DSN lives in backend/.env). Clear it so routing tests run on
+# a throwaway SQLite file.
+import os as _os
+import tempfile as _tempfile
+for _k in (
+    "DATABASE_URL", "SUPABASE_DB_URL", "SUPABASE_URL",
+    "SUPABASE_SERVICE_KEY", "VECTOR_API_KEY",
+):
+    _os.environ.pop(_k, None)
+_os.environ["VECTOR_DB"] = _os.path.join(_tempfile.mkdtemp(), "api.db")
+
 import api  # noqa: E402
 
 

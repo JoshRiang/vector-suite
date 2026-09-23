@@ -18,6 +18,15 @@ import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 
+# Hermetic: these tests must run on a throwaway SQLite file. If a
+# DATABASE_URL is present (e.g. the Supabase DSN in backend/.env) the
+# store would connect to the LIVE cloud database and the tests would
+# write there. Clear it so the suite always targets a temp file.
+for _k in (
+    "DATABASE_URL", "SUPABASE_DB_URL", "SUPABASE_URL",
+    "SUPABASE_SERVICE_KEY", "VECTOR_API_KEY",
+):
+    os.environ.pop(_k, None)
 os.environ["VECTOR_DB"] = os.path.join(tempfile.mkdtemp(), "tz.db")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
