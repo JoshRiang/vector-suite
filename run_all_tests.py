@@ -27,6 +27,7 @@ SUITES = [
     ("auth",          ROOT / "backend/test_auth.py"),
     ("daily brief",   ROOT / "backend/test_daily_brief.py"),
     ("flutter apps",  ROOT / "check_apps.py"),
+    ("calendar grid", ROOT / "verify_calendar_grid.py"),
 ]
 
 # These need a live Postgres. They are skipped (not failed) without a DSN so the
