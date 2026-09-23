@@ -542,6 +542,20 @@ def build_wsgi_app():
                 start_response(f"{status} Bad Request", list(headers.items()))
                 return [payload]
 
+        # Fold query parameters into the body.
+        #
+        # The app's diagnostic beacon sends its stage in the query string
+        # because a client whose body transport is broken (chunked encoding, no
+        # Content-Length) still delivers the URL. Without this the beacon
+        # arrived with an empty body and logged "stage=?", which is useless
+        # exactly when it matters most.
+        qs = environ.get("QUERY_STRING") or ""
+        if qs:
+            from urllib.parse import parse_qs
+            for k, v in parse_qs(qs).items():
+                if k not in body:
+                    body[k] = v[0] if v else ""
+
         status, headers, payload = route(method, path, body, user_id, api_key)
         start_response(f"{status} OK", list(headers.items()))
         return [payload]

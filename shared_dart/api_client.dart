@@ -34,8 +34,18 @@ class Api {
         try {
           final client = HttpClient()
             ..connectionTimeout = const Duration(seconds: 4);
+          // The stage travels in the QUERY STRING, not only the body.
+          //
+          // The first version posted JSON only, and the server logged the
+          // beacons as "stage=?" with an empty body - the stage was lost in
+          // transport. A URL survives a broken body, so the payload goes in
+          // both places and the server reads whichever arrives.
+          final uri = Uri.parse('$b/diag').replace(queryParameters: {
+            'stage': stage,
+            'detail': detail.length > 500 ? detail.substring(0, 500) : detail,
+          });
           final req = await client
-              .postUrl(Uri.parse('$b/diag'))
+              .postUrl(uri)
               .timeout(const Duration(seconds: 4));
           req.headers.set('Content-Type', 'application/json');
           req.headers.set('X-User-Id', defaultUserId);
