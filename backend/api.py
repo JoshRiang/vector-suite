@@ -365,6 +365,24 @@ def route(method: str, path: str, body: dict, user_id: str | None,
                         or os.path.exists(os.path.expanduser("~/.hermes/config.yaml"))),
         })
 
+    # Diagnostic beacon from the apps. Deliberately BEFORE the auth gate and
+    # exempt from it: its entire purpose is to report why a device cannot get
+    # further, so requiring the secret would make it useless in exactly the
+    # situation it exists for. It records only a stage name and text the app
+    # generates, never a credential, and it writes to a log file.
+    if p == "/diag" and method == "POST":
+        stage = str(body.get("stage", "?"))[:120]
+        detail = str(body.get("detail", ""))[:2000]
+        import time as _time
+        line = (f"{_time.strftime('%Y-%m-%d %H:%M:%S')} "
+                f"user={user_id or '-'} stage={stage} detail={detail}\n")
+        try:
+            with open("/home/josh/vector_suite/data/diag.log", "a") as f:
+                f.write(line)
+        except OSError:
+            pass
+        return _json_response(200, {"ok": True})
+
     # Every data route requires the shared secret when one is configured.
     if not _auth_ok({"X-Api-Key": api_key or ""}):
         return _json_response(401, {"error": "unauthorized"})

@@ -26,6 +26,7 @@ SUITES = [
     ("decomposition", ROOT / "backend/test_decompose.py"),
     ("timezone",      ROOT / "backend/test_timezone.py"),
     ("auth",          ROOT / "backend/test_auth.py"),
+    ("diag beacon",   ROOT / "backend/test_diag.py"),
     ("daily brief",   ROOT / "backend/test_daily_brief.py"),
     ("flutter apps",  ROOT / "check_apps.py"),
     ("calendar grid", ROOT / "verify_calendar_grid.py"),
