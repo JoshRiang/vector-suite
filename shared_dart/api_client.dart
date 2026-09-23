@@ -9,14 +9,24 @@
 library;
 
 import 'dart:convert';
-import 'dart:io' show SocketException;
+import 'dart:async' show TimeoutException;
+import 'dart:io' show HandshakeException, SocketException;
 
 import 'package:http/http.dart' as http;
 
 class Api {
-  Api({String? baseUrl, required this.userId, String? apiKey})
+  Api({String? baseUrl, required this.userId, String? apiKey, http.Client? client})
       : baseUrl = baseUrl ?? defaultBaseUrl,
-        apiKey = apiKey ?? defaultApiKey;
+        apiKey = apiKey ?? defaultApiKey,
+        _client = client;
+
+  /// Injectable HTTP client, used by tests to exercise the failure paths.
+  ///
+  /// The exception mapping below is what stands between a network blip and a
+  /// blank screen, so it must be testable without a real socket.
+  final http.Client? _client;
+
+  http.Client get _http => _client ?? http.Client();
 
   /// Tailscale address of the home server. Private to the user's own network.
   static const defaultBaseUrl = String.fromEnvironment(
@@ -65,17 +75,17 @@ class Api {
       late http.Response res;
       switch (method) {
         case 'GET':
-          res = await http.get(uri, headers: _headers).timeout(_timeout);
+          res = await _http.get(uri, headers: _headers).timeout(_timeout);
         case 'POST':
-          res = await http
+          res = await _http
               .post(uri, headers: _headers, body: jsonEncode(body ?? {}))
               .timeout(_timeout);
         case 'PATCH':
-          res = await http
+          res = await _http
               .patch(uri, headers: _headers, body: jsonEncode(body ?? {}))
               .timeout(_timeout);
         case 'DELETE':
-          res = await http.delete(uri, headers: _headers).timeout(_timeout);
+          res = await _http.delete(uri, headers: _headers).timeout(_timeout);
         default:
           throw ApiException('unsupported method $method');
       }
@@ -87,9 +97,32 @@ class Api {
         throw ApiException(msg, statusCode: res.statusCode);
       }
       return decoded;
+    } on ApiException {
+      rethrow;
+    } on TimeoutException {
+      // .timeout() throws this, NOT a SocketException. Leaving it uncaught made
+      // the whole future fail with an unhandled error, so the caller's
+      // `on ApiException` never fired, `_loading` stayed true and the app sat
+      // on a blank screen with no message -- the user saw a white app while the
+      // widget (whose Kotlin catches everything) correctly said "unreachable".
+      throw ApiException('The server took too long to answer. Tap to retry.',
+          offline: true);
+    } on HandshakeException {
+      throw ApiException('Secure connection to the server failed.',
+          offline: true);
     } on SocketException {
       throw ApiException(
           'Cannot reach the server. Check your connection.', offline: true);
+    } on http.ClientException {
+      // http wraps TLS/DNS/connection failures in ClientException, which is NOT
+      // a SocketException. Catching only SocketException let these escape.
+      throw ApiException(
+          'Cannot reach the server. Check your connection.', offline: true);
+    } on FormatException {
+      // A non-JSON body (a captive portal, a proxy error page) must surface as a
+      // message, never as an unhandled crash.
+      throw ApiException('The server sent an unexpected reply.',
+          offline: true);
     }
   }
 

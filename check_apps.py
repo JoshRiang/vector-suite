@@ -86,6 +86,13 @@ MATERIAL_ONLY = [
 # Packages that are framework-provided, not the app's own package name.
 FRAMEWORK_PKGS = {"flutter", "flutter_test", "flutter_localizations"}
 
+# Third-party packages that are legitimately imported by tests. The check below
+# exists to catch a test importing a SIBLING APP's package (e.g. vector-tasks'
+# test importing vector_calendar); it is not meant to police pub.dev packages,
+# and flagging `http` was a false positive that would have blocked every push.
+THIRD_PARTY_PKGS = {"http", "shared_preferences", "cupertino_icons",
+                    "http_parser", "path", "collection", "meta", "async"}
+
 
 def strip_comments(src: str) -> str:
     """Remove Dart comments while respecting string literals.
@@ -202,9 +209,23 @@ def check(app: str, pkg: str) -> list[str]:
         #    (framework packages are not the app's own package).
         if f.parent.name == "test":
             for m in re.finditer(r"package:([a-z_]+)/", src):
-                if m.group(1) not in FRAMEWORK_PKGS and m.group(1) != pkg:
-                    errs.append(
-                        f"{rel}: imports package:{m.group(1)} but app is {pkg}")
+                p = m.group(1)
+                if p in FRAMEWORK_PKGS or p in THIRD_PARTY_PKGS or p == pkg:
+                    continue
+                errs.append(
+                    f"{rel}: imports package:{p} but app is {pkg}")
+
+        # 6. `library;` must come BEFORE every import. A file with imports above
+        #    the library directive is invalid Dart and fails `flutter test`,
+        #    which is easy to introduce when prepending imports by script.
+        lib_at = src.find("library;")
+        first_imp = src.find("\nimport ")
+        if lib_at != -1 and first_imp != -1 and first_imp < lib_at:
+            errs.append(f"{rel}: an import appears above `library;` "
+                        f"(invalid Dart)")
+        if lib_at != -1 and src.lstrip().startswith("import "):
+            errs.append(f"{rel}: file starts with an import but declares "
+                        f"`library;` later")
 
     # 6. Android identity must be internally consistent.
     gradle = (d / "android/app/build.gradle").read_text()
