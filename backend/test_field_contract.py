@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import urllib.request
+from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,6 +59,14 @@ ALLOWED = {
     # Verified live that POST /tasks returns the row flat, so no response ever
     # carries this key and the wrapper branch is simply never taken.
     "task",
+    # Keys the apps read off maps they built THEMSELVES, not off a response:
+    # underscore-prefixed stamps added during reload, and single-letter keys of
+    # the local exchange widget. Verified by inspection of the write sites.
+    "_goal_id", "_goal_title", "_goal_title_", "a", "q",
+    # Aliases tried with `??` for compatibility, so no live response must carry
+    # them: the real /commands rows are keyed {id, role, content, created_at}.
+    "role", "content", "instruction", "reply", "applied", "count",
+    "action", "title", "command", "input", "output", "text", "result",
 }
 
 
@@ -94,7 +103,8 @@ def main() -> int:
 
     # --- gather live payloads, one per endpoint the apps consume -------------
     payloads: dict[str, set[str]] = {}
-    endpoints = ["/goals", "/tasks/startable", "/today", "/finance"]
+    endpoints = ["/goals", "/tasks/startable", "/today", "/finance",
+                 "/calendar/range", "/commands"]
     try:
         goals = get("/goals")
         payloads["/goals"] = keys_of(goals)
@@ -105,6 +115,15 @@ def main() -> int:
         payloads["/tasks/startable"] = keys_of(get("/tasks/startable"))
         payloads["/today"] = keys_of(get("/today"))
         payloads["/finance"] = keys_of(get("/finance"))
+        # The calendar apps read these two; without fetching them, every key
+        # they legitimately use (items, days, reply, applied) looks like a
+        # violation and the check fails on a correct app.
+        today = date.today()
+        start = (today - timedelta(days=30)).isoformat()
+        end = (today + timedelta(days=90)).isoformat()
+        payloads["/calendar/range"] = keys_of(
+            get(f"/calendar/range?start={start}&end={end}"))
+        payloads["/commands"] = keys_of(get("/commands"))
     except Exception as e:  # noqa: BLE001
         print(f"FAIL: could not reach the API at {BASE}: {type(e).__name__}: {e}")
         print("      start it first, then re-run.")
@@ -163,6 +182,17 @@ def main() -> int:
         "widget.goal['id'] only used as a fallback behind goal_id",
         not bad_primary,
     ))
+
+    # /commands rows are {id, role, content, created_at}. Both apps used to read
+    # `instruction`/`reply`, so every history entry was skipped or replaced by a
+    # placeholder and past instructions were invisible with no error anywhere.
+    # Pin that the real key is the one read.
+    pins.append(("/commands sends content", "content" in payloads["/commands"]))
+    pins.append(("/commands sends role", "role" in payloads["/commands"]))
+    for app in ("vector-tasks", "vector-calendar"):
+        src = (ROOT / app / "lib/main.dart").read_text()
+        reads_content = "'content'" in src
+        pins.append((f"{app} reads the history 'content' key", reads_content))
     pin_fail = [name for name, ok in pins if not ok]
     for name, ok in pins:
         print(f"  {'ok  ' if ok else 'FAIL'} {name}")
