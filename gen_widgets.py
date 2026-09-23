@@ -161,25 +161,32 @@ COMMON = r'''
      * thread could outlive goAsync()'s finisher and be killed before sending.
      */
     private fun beacon(context: Context, stage: String, detail: String) {
-        try {
-            val base = context.getString(R.string.vector_api_base).trimEnd('/')
-            val url = java.net.URL(base + "/diag?stage=" +
-                java.net.URLEncoder.encode(stage, "UTF-8") + "&detail=" +
-                java.net.URLEncoder.encode(detail.take(500), "UTF-8"))
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 4000
-                readTimeout = 4000
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("X-User-Id",
-                    context.getString(R.string.vector_user_id))
+        // Tries every candidate endpoint, like the real requests do. The first
+        // version used only the primary URL, so when the primary was the
+        // unreachable one the beacon failed too and the widget's failure was
+        // never reported anywhere - the exact moment it was needed.
+        for (base in candidateBases(context)) {
+            try {
+                val url = java.net.URL(base.trimEnd('/') + "/diag?stage=" +
+                    java.net.URLEncoder.encode(stage, "UTF-8") + "&detail=" +
+                    java.net.URLEncoder.encode(detail.take(500), "UTF-8"))
+                val conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("X-User-Id",
+                        context.getString(R.string.vector_user_id))
+                }
+                conn.outputStream.use { it.write("{}".toByteArray()) }
+                conn.responseCode
+                conn.disconnect()
+                return
+            } catch (e: Exception) {
+                // Try the next endpoint; never let the diagnostic become the
+                // failure it is trying to report.
             }
-            conn.outputStream.use { it.write("{}".toByteArray()) }
-            conn.responseCode
-            conn.disconnect()
-        } catch (e: Exception) {
-            // Never let the diagnostic become the failure.
         }
     }
 
