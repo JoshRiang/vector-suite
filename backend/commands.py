@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta
@@ -40,6 +41,24 @@ ACTIONS = {
 # How far ahead/behind a date may be before it is treated as a misparse.
 MAX_DAYS_AHEAD = 730
 MAX_DAYS_BEHIND = 365
+
+# A single instruction that deletes more than this many items is treated as a
+# bulk change and must be confirmed before anything is written.
+#
+# This is a real hole, not a hypothetical: "clear my entire calendar" was
+# correctly refused by the model, but "delete all my tasks" was not, and wiped
+# every row. One paraphrased instruction must not be able to erase the user's
+# real calendar, so the decision is enforced here rather than trusted to the
+# model's judgement.
+BULK_DELETE_LIMIT = 1
+
+# Words that accept a pending bulk change, and words that drop it.
+CONFIRM_RE = re.compile(
+    r"^\s*(yes|y|yeah|yep|yup|ok|okay|confirm|confirmed|do it|go ahead|"
+    r"proceed|sure|ya|iya|lanjut|gas|hapus|setuju)\b", re.I)
+CANCEL_RE = re.compile(
+    r"^\s*(no|n|nope|cancel|stop|nevermind|never mind|forget it|"
+    r"don'?t|jangan|batal|gak|tidak)\b", re.I)
 
 SYSTEM_PROMPT = """You convert one instruction about a calendar/task list into JSON operations.
 
@@ -332,9 +351,41 @@ def _apply_op(user_id: str, op: dict) -> dict:
     return {"ok": False, "action": action, "error": "unhandled"}
 
 
+def _pending_path(user_id: str) -> str:
+    return f"/tmp/vector_pending_{user_id}.json"
+
+
+def _set_pending(user_id: str, ops: list, reply: str) -> None:
+    try:
+        with open(_pending_path(user_id), "w", encoding="utf-8") as fh:
+            json.dump({"ops": ops, "reply": reply}, fh)
+    except OSError:
+        pass
+
+
+def _take_pending(user_id: str) -> dict | None:
+    path = _pending_path(user_id)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        os.unlink(path)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _describe(ops: list) -> str:
+    """One short line naming what a bulk change would delete."""
+    titles = []
+    for op in ops[:6]:
+        title = _clean_text(op.get("title"), 60) or op.get("id") or "an item"
+        titles.append(title)
+    extra = "" if len(ops) <= 6 else f" and {len(ops) - 6} more"
+    return ", ".join(titles) + extra
+
+
 def handle(user_id: str, instruction: str) -> dict:
     """Run one instruction end to end and report what actually changed."""
-    import api
     instruction = (instruction or "").strip()
     if not instruction:
         return {"ok": False, "error": "empty_instruction", "applied": []}
@@ -342,6 +393,34 @@ def handle(user_id: str, instruction: str) -> dict:
     store.db_request("POST", "chat_messages",
                      body={"user_id": user_id, "role": "user",
                            "content": instruction})
+
+    # A pending bulk change is resolved BEFORE the model sees anything, so a
+    # bare "yes" can never be reinterpreted as a fresh instruction.
+    pending = _take_pending(user_id)
+    if pending is not None:
+        if CANCEL_RE.match(instruction):
+            reply = "Cancelled. Nothing was deleted."
+            store.db_request("POST", "chat_messages",
+                             body={"user_id": user_id, "role": "assistant",
+                                   "content": reply})
+            return {"ok": True, "reply": reply, "applied": [], "count": 0}
+        if not CONFIRM_RE.match(instruction):
+            # Anything other than a clear yes/cancel is treated as a new
+            # instruction; the pending change is dropped rather than left armed.
+            reply = ("I dropped the pending deletion because that wasn't a yes. "
+                     "Ask me again if you still want it.")
+            store.db_request("POST", "chat_messages",
+                             body={"user_id": user_id, "role": "assistant",
+                                   "content": reply})
+            return {"ok": True, "reply": reply, "applied": [], "count": 0}
+        results = [_apply_op(user_id, op) for op in pending["ops"]]
+        ok_count = sum(1 for r in results if r.get("ok"))
+        reply = f"Done — deleted {ok_count} item(s)."
+        store.db_request("POST", "chat_messages",
+                         body={"user_id": user_id, "role": "assistant",
+                               "content": reply})
+        return {"ok": bool(ok_count), "reply": reply, "applied": results,
+                "count": ok_count}
 
     try:
         raw = _call_llm(instruction, _context(user_id))
@@ -367,7 +446,21 @@ def handle(user_id: str, instruction: str) -> dict:
     ops = payload.get("ops")
     if not isinstance(ops, list):
         ops = []
-    results = [_apply_op(user_id, op) for op in ops if isinstance(op, dict)]
+    ops = [op for op in ops if isinstance(op, dict)]
+
+    # Bulk destructive change: ask first. Nothing is written until confirmed.
+    deletes = [op for op in ops if op.get("action") == "delete_task"]
+    if len(deletes) > BULK_DELETE_LIMIT:
+        _set_pending(user_id, ops, _clean_text(payload.get("reply"), 300) or "")
+        reply = (f"That would delete {len(deletes)} items ({_describe(deletes)}). "
+                 "Reply YES to confirm or NO to cancel.")
+        store.db_request("POST", "chat_messages",
+                         body={"user_id": user_id, "role": "assistant",
+                               "content": reply})
+        return {"ok": False, "error": "needs_confirmation", "reply": reply,
+                "applied": [], "count": 0, "pending": len(deletes)}
+
+    results = [_apply_op(user_id, op) for op in ops]
 
     ok_count = sum(1 for r in results if r.get("ok"))
     failed = [r for r in results if not r.get("ok")]
