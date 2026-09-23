@@ -28,6 +28,10 @@ SUITES = [
     ("daily brief",   ROOT / "backend/test_daily_brief.py"),
     ("flutter apps",  ROOT / "check_apps.py"),
     ("calendar grid", ROOT / "verify_calendar_grid.py"),
+    # Needs the live API; skips itself cleanly if unreachable. This is the only
+    # suite that compares the field names the Dart reads against the keys the
+    # API returns - the gap that let a broken tasks app pass every other check.
+    ("field contract", ROOT / "backend/test_field_contract.py"),
 ]
 
 # These need a live Postgres. They are skipped (not failed) without a DSN so the

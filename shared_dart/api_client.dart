@@ -134,26 +134,24 @@ class Api {
       if (detail != null && detail.isNotEmpty) 'detail': detail,
       if (targetDate != null) 'target_date': targetDate,
     });
-    return GoalResult.fromJson(data as Map<String, dynamic>);
+    return GoalResult.fromJson(Safe.map(data));
   }
 
   Future<List<Map<String, dynamic>>> goals() async =>
-      ((await _send('GET', '/goals')) as List)
-          .cast<Map<String, dynamic>>();
+      Safe.mapList(await _send('GET', '/goals'));
 
   /// Only tasks that can be started right now -- never the whole backlog.
   Future<List<Map<String, dynamic>>> startable() async =>
-      ((await _send('GET', '/tasks/startable')) as List)
-          .cast<Map<String, dynamic>>();
+      Safe.mapList(await _send('GET', '/tasks/startable'));
 
   Future<Map<String, dynamic>> today() async =>
-      (await _send('GET', '/today')) as Map<String, dynamic>;
+      Safe.map(await _send('GET', '/today'));
 
   Future<Map<String, dynamic>> productivity() async =>
-      (await _send('GET', '/productivity')) as Map<String, dynamic>;
+      Safe.map(await _send('GET', '/productivity'));
 
   Future<Map<String, dynamic>> finance() async =>
-      (await _send('GET', '/finance')) as Map<String, dynamic>;
+      Safe.map(await _send('GET', '/finance'));
 
   Future<void> setTaskStatus(String id, String status) =>
       _send('PATCH', '/tasks', body: {'id': id, 'status': status});
@@ -166,7 +164,7 @@ class Api {
 
   /// Every task under one goal, each flagged startable or blocked.
   Future<Map<String, dynamic>> goalTasks(String goalId) async =>
-      (await _send('GET', '/goals/$goalId/tasks')) as Map<String, dynamic>;
+      Safe.map(await _send('GET', '/goals/$goalId/tasks'));
 
   /// Add a task to a goal.
   ///
@@ -180,13 +178,13 @@ class Api {
     String? why,
     int priority = 3,
   }) async =>
-      (await _send('POST', '/tasks', body: {
+      Safe.map(await _send('POST', '/tasks', body: {
         'goal_id': goalId,
         'title': title,
         'minutes': minutes,
         if (why != null && why.isNotEmpty) 'why': why,
         'priority': priority,
-      })) as Map<String, dynamic>;
+      }));
 
   Future<void> renameGoal(String goalId, String title) =>
       _send('PATCH', '/goals/$goalId', body: {'title': title});
@@ -211,6 +209,30 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
+/// Null-safe JSON readers.
+///
+/// Every value from the server is `dynamic`. An `as` cast on a wrong-typed
+/// value throws, and a throw inside a build or a loader used to blank the
+/// screen. These helpers degrade to sane defaults instead, so a wrong or
+/// absent field can never crash the UI.
+class Safe {
+  /// A decoded-JSON map, or {} when the body is absent or the wrong shape.
+  static Map<String, dynamic> map(dynamic v) =>
+      v is Map ? Map<String, dynamic>.from(v) : <String, dynamic>{};
+
+  /// A decoded-JSON list of maps, skipping rows of the wrong shape.
+  static List<Map<String, dynamic>> mapList(dynamic v) => v is List
+      ? v.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).toList()
+      : <Map<String, dynamic>>[];
+
+  /// A list of anything (kept for counting), or [] when absent/wrong shape.
+  static List list(dynamic v) => v is List ? v : <dynamic>[];
+
+  /// A number field, or null when absent or not a number. Strings are NOT
+  /// coerced: silently parsing "abc" as a number would hide server bugs.
+  static num? number(dynamic v) => v is num ? v : null;
+}
+
 class GoalResult {
   GoalResult({required this.goal, required this.tasks, required this.degraded,
       required this.note});
@@ -224,15 +246,16 @@ class GoalResult {
   final String note;
 
   factory GoalResult.fromJson(Map<String, dynamic> j) => GoalResult(
-        goal: (j['goal'] as Map?)?.cast<String, dynamic>() ?? {},
-        tasks: ((j['tasks'] as List?) ?? [])
-            .cast<Map<String, dynamic>>(),
+        // `is` checks, not `as` casts: a present-but-wrong-typed value must
+        // degrade to the default, never throw and blank the screen.
+        goal: Safe.map(j['goal']),
+        tasks: Safe.mapList(j['tasks']),
         degraded: j['degraded'] == true,
         note: (j['note'] ?? '').toString(),
       );
 
   int get totalMinutes =>
-      tasks.fold(0, (s, t) => s + ((t['minutes'] as num?)?.toInt() ?? 0));
+      tasks.fold(0, (s, t) => s + (Safe.number(t['minutes'])?.toInt() ?? 0));
 }
 
 /// One goal's full checklist, as returned by `GET /goals/<id>/tasks`.
@@ -255,10 +278,10 @@ class GoalTasks {
   final int pctDone;
 
   factory GoalTasks.fromJson(Map<String, dynamic> j) {
-    final list = ((j['tasks'] as List?) ?? []).cast<Map<String, dynamic>>();
+    final list = Safe.mapList(j['tasks']);
     final done =
-        (j['done'] as num?)?.toInt() ?? list.where((t) => t['status'] == 'done').length;
-    final total = (j['total'] as num?)?.toInt() ?? list.length;
+        Safe.number(j['done'])?.toInt() ?? list.where((t) => t['status'] == 'done').length;
+    final total = Safe.number(j['total'])?.toInt() ?? list.length;
     return GoalTasks(
       goalId: (j['goal_id'] ?? '').toString(),
       tasks: list,
@@ -266,7 +289,7 @@ class GoalTasks {
       done: done,
       // Derive rather than trust: a server that omits pct_done would otherwise
       // render an empty progress bar and look like a bug.
-      pctDone: (j['pct_done'] as num?)?.toInt() ??
+      pctDone: Safe.number(j['pct_done'])?.toInt() ??
           (total == 0 ? 0 : ((100 * done) / total).round()),
     );
   }
@@ -300,7 +323,7 @@ class TaskState {
   factory TaskState.fromJson(Map<String, dynamic> t) => TaskState(
         id: (t['id'] ?? '').toString(),
         title: (t['title'] ?? '').toString(),
-        minutes: (t['minutes'] as num?)?.toInt() ?? 30,
+        minutes: Safe.number(t['minutes'])?.toInt() ?? 30,
         status: (t['status'] ?? 'todo').toString(),
         startable: t['startable'] == true,
         blockerTitle: t['blocked_by_title']?.toString(),
