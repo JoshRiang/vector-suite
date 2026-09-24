@@ -149,6 +149,43 @@ def misplaced_members(code: str) -> list[str]:
     return problems
 
 
+def duplicate_members(code: str) -> list[str]:
+    """Find members declared more than once in the same class.
+
+    This is the failure that cost a CI round trip: removing an arrow-bodied
+    member by counting braces ran past its `;` into the next class and deleted
+    two class headers, which Dart reports as "'dispose' is already declared in
+    this scope" and "The method 'TaskDetailPage' isn't defined".
+
+    Only DECLARATIONS are counted, which means requiring a return type before
+    the name. Without that, every widget constructor call inside build() -
+    `Row(`, `Text(`, `setState(` - looks like a redeclaration and the check
+    drowns in false positives, which is worse than no check.
+    """
+    types = (r"Future<[^>]*>|Stream<[^>]*>|void|int|double|num|bool|String|"
+             r"Widget|Color|IconData|DateTime|Duration|List<[^>]*>|"
+             r"Map<[^>]*>|Set<[^>]*>|TextStyle|BoxDecoration|EdgeInsets")
+    decl = re.compile(
+        rf"^\s{{2}}(?:@override\s+)?(?:(?:static|final|late|const)\s+)*"
+        rf"(?:{types})\s+(\w+)\s*\(", re.M)
+    getter = re.compile(
+        rf"^\s{{2}}(?:@override\s+)?(?:(?:static|final|late|const)\s+)*"
+        rf"(?:{types})\s+get\s+(\w+)", re.M)
+
+    problems = []
+    for name, start, end in class_bodies(code):
+        body = code[start:end]
+        seen: dict[str, int] = {}
+        for m in decl.finditer(body):
+            seen[m.group(1)] = seen.get(m.group(1), 0) + 1
+        for m in getter.finditer(body):
+            seen[m.group(1)] = seen.get(m.group(1), 0) + 1
+        for member, n in seen.items():
+            if n > 1:
+                problems.append(f"{member} declared {n}x in {name}")
+    return problems
+
+
 CHECKS = [
     # (name, regex, must_be_absent, why)
     ("material import", r"import\s+'package:flutter/material\.dart'", True,
@@ -243,6 +280,14 @@ def main() -> int:
             fails += 1
         else:
             print("  ok   no out-of-scope class members")
+
+        dupes = duplicate_members(code)
+        if dupes:
+            for prob in dupes:
+                print(f"  FAIL duplicate member: {prob}")
+            fails += 1
+        else:
+            print("  ok   no duplicate members in a class")
 
         # .first must be guarded nearby.
         for m in re.finditer(r"\.first\b", code):
