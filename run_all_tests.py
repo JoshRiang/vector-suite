@@ -30,6 +30,7 @@ SUITES = [
     ("calendar days", ROOT / "backend/test_calendar.py"),
     ("command console", ROOT / "backend/test_commands.py"),
     ("command safety", ROOT / "backend/test_command_safety.py"),
+    ("scheduler", ROOT / "backend/test_scheduler.py"),
     ("daily brief",   ROOT / "backend/test_daily_brief.py"),
     ("flutter apps",  ROOT / "check_apps.py"),
     ("calendar grid", ROOT / "verify_calendar_grid.py"),

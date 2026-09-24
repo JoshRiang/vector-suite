@@ -638,6 +638,31 @@ def route(method: str, path: str, body: dict, user_id: str | None,
         if p == "/calendar" and method == "GET":
             return _json_response(200, calendar_month(user_id))
 
+        # Lay the open work across a day, ranked by importance. POST applies it
+        # (this is the "create my schedule for today" action); GET previews it
+        # without writing, which is what a UI should use to show a plan first.
+        if p == "/schedule" and method in ("GET", "POST"):
+            import scheduler as _sched
+            day = body.get("date") or (query or {}).get("date") or None
+            apply_it = method == "POST" and str(
+                body.get("preview", "")).lower() not in ("1", "true", "yes")
+            try:
+                return _json_response(200, _sched.build_day(
+                    user_id, day=day, apply=apply_it))
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(500, {
+                    "error": "schedule_failed",
+                    "detail": f"{type(exc).__name__}: {exc}"})
+
+        # Reminders that are due right now, from each task's own lead times.
+        if p == "/reminders" and method == "GET":
+            import scheduler as _sched
+            try:
+                return _json_response(200, {"due": _sched.due_reminders(user_id)})
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(500, {"error": "reminders_failed",
+                                            "detail": str(exc)})
+
         # Full items for a date range: what a month/day calendar actually needs.
         if p == "/calendar/range" and method == "GET":
             return _json_response(200, calendar_range(

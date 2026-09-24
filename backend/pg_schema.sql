@@ -110,15 +110,11 @@ create table if not exists chat_messages (
 );
 create index if not exists chat_user_created_idx on chat_messages(user_id, created_at);
 
--- Additive columns for tables that predate them. `create table if not exists`
--- does NOT add columns to an existing table, so each new column needs an
--- explicit ALTER. The if-not-exists form keeps this safe to re-run.
-alter table tasks add column if not exists all_day   integer not null default 0;
-alter table tasks add column if not exists location  text;
-alter table tasks add column if not exists notes     text;
-alter table tasks add column if not exists repeat    text;
-alter table tasks add column if not exists reminders text;
-alter table tasks add column if not exists color     text;
+-- Additive columns are applied by store._migrate(), NOT here. ALTER TABLE needs
+-- an ACCESS EXCLUSIVE lock, so putting them in this file would block for the
+-- server's statement timeout every time a second process (a cron job, a test)
+-- ran init_db() while the API held the table. _migrate() sets a short
+-- lock_timeout and treats an already-present column as success.
 
 alter table chat_messages enable row level security;
 

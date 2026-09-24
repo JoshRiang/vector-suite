@@ -179,37 +179,69 @@ MIGRATIONS = [
     ("tasks", "repeat", "text"),
     ("tasks", "reminders", "text"),
     ("tasks", "color", "text"),
+    # 1 when the SCHEDULER chose this time, 0 when the user did. Without
+    # this the daily plan cannot tell its own placements from a real
+    # appointment, so re-running it would either refuse to move its own
+    # output (plans pile up on the same hour) or move the user's
+    # appointments (worse).
+    ("tasks", "auto_scheduled", "integer not null default 0"),
 ]
 
 
-def _migrate(conn) -> None:
-    """Apply additive column migrations, tolerating ones already applied.
+def _existing_columns(conn, table: str) -> set[str]:
+    """Column names for a table, dialect-neutral.
 
-    A short lock_timeout matters: ALTER TABLE needs an ACCESS EXCLUSIVE lock, so
-    if another connection (the running API, whose thread-local connection can sit
-    in an open transaction holding an ACCESS SHARE lock) has the table, the ALTER
-    blocks until the server's 2-minute statement timeout. Failing fast and
-    retrying on the next boot is far better than hanging startup for minutes.
+    PRAGMA table_info is intercepted by pgcompat for Postgres, so the same call
+    works on both backends and there is no information_schema dialect split.
+    """
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except Exception:  # noqa: BLE001
+        return set()
+    names = set()
+    for r in rows:
+        try:
+            names.add(str(r["name"]))
+        except (TypeError, KeyError, IndexError):
+            try:
+                names.add(str(r[1]))
+            except (TypeError, IndexError):
+                continue
+    return names
+
+
+def _migrate(conn) -> None:
+    """Apply additive column migrations, skipping ones already applied.
+
+    Checking first matters more than it looks. ALTER TABLE needs an ACCESS
+    EXCLUSIVE lock, so blindly re-issuing every ALTER on every process start
+    makes each new process (a cron job, a test) block behind the running API
+    until the server's statement timeout kills it. Reading the columns and
+    altering only what is genuinely missing means the steady state takes no
+    lock at all, and a fresh database still gets its columns.
     """
     try:
         conn.execute("set lock_timeout = '3s'")
     except Exception:  # noqa: BLE001
         pass  # SQLite has no lock_timeout; harmless.
-    for table, column, decl in MIGRATIONS:
-        try:
-            conn.execute(f"alter table {table} add column {column} {decl}")
-        except Exception as exc:  # noqa: BLE001
-            # Already present is the expected outcome on every run but the
-            # first. A lock timeout is also survivable: the column is simply
-            # added on a later boot.
-            msg = str(exc).lower()
-            if not any(s in msg for s in ("duplicate", "already exists",
-                                          "lock timeout", "cancel")):
-                pass
     try:
-        conn.execute("set lock_timeout = 0")
-    except Exception:  # noqa: BLE001
-        pass
+        for table, column, decl in MIGRATIONS:
+            if column in _existing_columns(conn, table):
+                continue
+            try:
+                conn.execute(f"alter table {table} add column {column} {decl}")
+            except Exception as exc:  # noqa: BLE001
+                # A lost race (another process added it first) or a lock timeout
+                # is survivable: the column is added on a later run.
+                msg = str(exc).lower()
+                if not any(s in msg for s in ("duplicate", "already exists",
+                                              "lock timeout", "cancel")):
+                    raise
+    finally:
+        try:
+            conn.execute("set lock_timeout = 0")
+        except Exception:  # noqa: BLE001
+            pass
 
 TABLES = {
     "goals", "tasks", "day_plans", "focus_sessions",
@@ -224,7 +256,8 @@ WRITABLE = {
               "completed_at"},
     "tasks": {"user_id", "goal_id", "title", "why", "minutes", "blocked_by",
               "status", "priority", "source", "scheduled_at", "completed_at",
-              "all_day", "location", "notes", "repeat", "reminders", "color"},
+              "all_day", "location", "notes", "repeat", "reminders", "color",
+              "auto_scheduled"},
     "chat_messages": {"user_id", "role", "content"},
     "day_plans": {"user_id", "plan_date", "planned_minutes", "actual_minutes",
                   "summary"},
@@ -253,14 +286,33 @@ def init_db() -> None:
     if _initialised:
         return
     conn = _connect()
-    if _dsn():
-        # Postgres: run the mirrored schema. Kept as a separate file so the
-        # exact DDL applied to the cloud database is reviewable in one place.
-        with open(PG_SCHEMA_PATH, encoding="utf-8") as fh:
-            conn.executescript(fh.read())
-    else:
-        conn.executescript(SCHEMA)
-    # Additive columns for tables that already existed before them.
+
+    # Creating the schema is a one-time job, not something every process should
+    # redo on start. Running the DDL unconditionally means each new process
+    # (a cron job, a test, the CLI) issues CREATE/ALTER against tables the API is
+    # already using; ALTER TABLE needs an ACCESS EXCLUSIVE lock, so the second
+    # process blocks for the server's statement timeout and dies. Probe for the
+    # newest table instead: if it is there, the schema is applied and there is
+    # nothing to do.
+    already_applied = False
+    try:
+        conn.execute("select 1 from chat_messages limit 1")
+        already_applied = True
+    except Exception:  # noqa: BLE001
+        already_applied = False
+
+    if not already_applied:
+        if _dsn():
+            # Postgres: run the mirrored schema. Kept as a separate file so the
+            # exact DDL applied to the cloud database is reviewable in one place.
+            with open(PG_SCHEMA_PATH, encoding="utf-8") as fh:
+                conn.executescript(fh.read())
+        else:
+            conn.executescript(SCHEMA)
+        conn.commit()
+
+    # Additive columns for tables that already existed before them. Safe to run
+    # every time: _migrate tolerates an existing column and fails fast on a lock.
     _migrate(conn)
     conn.commit()
     _initialised = True
