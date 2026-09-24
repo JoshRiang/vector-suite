@@ -168,12 +168,24 @@ CHECKS = [
 ]
 
 # Requirements differ per app: the finance app has no calendar and no task list,
-# so demanding a command console there would be wrong. Each entry is
-# (substring, human label, required in these apps).
+# and the command console was REMOVED on the user's instruction ("Only Telegram —
+# the app is just for viewing"), so demanding it would enforce a design he
+# explicitly rejected. What each app must have is what he asked for.
 REQUIRED = [
-    ("command(", "command console", {"vector-tasks", "vector-calendar"}),
-    ("calendarRange", "calendar range fetch", {"vector-calendar"}),
     ("CupertinoSliverRefreshControl", "pull-to-refresh", set(APPS)),
+    # The calendar must be an hour grid, not an agenda list. His complaint was
+    # that it "only show dates not hours".
+    ("kHourHeight", "hour-by-hour day grid", {"vector-calendar"}),
+    ("kDayStartHour", "explicit day range", {"vector-calendar"}),
+    # Tasks must read as a checklist with the priority visible.
+    ("_priorityLabel", "visible priority label", {"vector-tasks"}),
+    ("_toggleTask", "tappable complete checkbox", {"vector-tasks"}),
+]
+
+# A command console must NOT be present any more.
+FORBIDDEN = [
+    ("command(", "command console call"),
+    ("_commandCard", "command console card"),
 ]
 
 
@@ -257,6 +269,13 @@ def main() -> int:
             else:
                 print(f"  FAIL missing {label}")
                 fails += 1
+
+        for needle, label in FORBIDDEN:
+            if needle in code:
+                print(f"  FAIL {label} should have been removed")
+                fails += 1
+            else:
+                print(f"  ok   no {label}")
 
     print()
     if fails:
