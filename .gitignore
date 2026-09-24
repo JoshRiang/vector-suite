@@ -11,3 +11,5 @@ vector-finance/
 venv/
 backend/.sbpw_probe
 *.sbpw*
+data/reminder_outbox.jsonl
+data/reminders_sent.jsonl
