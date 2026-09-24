@@ -189,10 +189,16 @@ def main() -> int:
     # Pin that the real key is the one read.
     pins.append(("/commands sends content", "content" in payloads["/commands"]))
     pins.append(("/commands sends role", "role" in payloads["/commands"]))
+    # The apps no longer read the history: the user's design is "Only Telegram -
+    # the app is just for viewing", so the command console was REMOVED. The pin
+    # that asserted they read 'content' now fails on correct code, so it is
+    # replaced by its inverse - a pin that the console is gone, so it can never
+    # creep back and re-introduce an input surface the user rejected.
     for app in ("vector-tasks", "vector-calendar"):
         src = (ROOT / app / "lib/main.dart").read_text()
-        reads_content = "'content'" in src
-        pins.append((f"{app} reads the history 'content' key", reads_content))
+        console_gone = ("commandHistory" not in src
+                        and "command(" not in src.replace("// command(", ""))
+        pins.append((f"{app} has no command console", console_gone))
     pin_fail = [name for name, ok in pins if not ok]
     for name, ok in pins:
         print(f"  {'ok  ' if ok else 'FAIL'} {name}")

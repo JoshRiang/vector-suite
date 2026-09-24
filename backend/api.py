@@ -578,6 +578,11 @@ def route(method: str, path: str, body: dict, user_id: str | None,
         # Quick actions so a home-screen widget can finish/skip a task with one
         # tap, without opening the app. Kept as explicit verbs rather than a
         # generic PATCH so the widget needs no request body at all.
+        #
+        # These MUST report whether a row actually changed. Reporting ok:True
+        # unconditionally made a tap on a stale task (already deleted, or a
+        # different user's) look successful while the checkbox silently did
+        # nothing - and the widget cannot tell the difference.
         if p.startswith("/tasks/") and p.endswith("/done") and method == "POST":
             tid = p[len("/tasks/"):-len("/done")].strip("/")
             rows = db_request("PATCH", "tasks",
@@ -585,6 +590,9 @@ def route(method: str, path: str, body: dict, user_id: str | None,
                                       "user_id": f"eq.{user_id}"},
                               body={"status": "done",
                                     "completed_at": _now_local_iso()})
+            if not rows:
+                return _json_response(404, {"error": "task_not_found",
+                                            "id": tid})
             return _json_response(200, {"ok": True, "task": rows})
 
         if p.startswith("/tasks/") and p.endswith("/skip") and method == "POST":
@@ -593,6 +601,9 @@ def route(method: str, path: str, body: dict, user_id: str | None,
                               params={"id": f"eq.{tid}",
                                       "user_id": f"eq.{user_id}"},
                               body={"status": "skipped"})
+            if not rows:
+                return _json_response(404, {"error": "task_not_found",
+                                            "id": tid})
             return _json_response(200, {"ok": True, "task": rows})
 
         # Un-tick: the widget's checkbox toggles both ways, so a mis-tap must be
@@ -604,6 +615,9 @@ def route(method: str, path: str, body: dict, user_id: str | None,
                               params={"id": f"eq.{tid}",
                                       "user_id": f"eq.{user_id}"},
                               body={"status": "todo", "completed_at": None})
+            if not rows:
+                return _json_response(404, {"error": "task_not_found",
+                                            "id": tid})
             return _json_response(200, {"ok": True, "task": rows})
 
         if p == "/tasks" and method == "PATCH":

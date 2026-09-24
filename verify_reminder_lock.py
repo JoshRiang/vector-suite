@@ -21,17 +21,42 @@ LEDGER = os.path.join(DATA, "reminders_sent.jsonl")
 sys.path.insert(0, BACKEND)
 os.chdir(BACKEND)
 
+# Load .env EXACTLY as remind.py does, before importing store. Without this the
+# probe wrote its task to SQLite while the spawned worker read Postgres, so the
+# worker found nothing and the test reported a lock failure that did not exist -
+# two different databases in one test. Any harness that writes through `store`
+# and then runs a script must share its environment.
+for _cand in (os.path.join(BACKEND, "..", ".env"), os.path.join(BACKEND, ".env")):
+    if os.path.exists(_cand):
+        for _line in open(_cand, encoding="utf-8"):
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
 import store  # noqa: E402
 
 WORKERS = 6
 
 
-def ledger_lines() -> int:
+def ledger_entries_for(tid: str) -> int:
+    """How many ledger lines exist for this task.
+
+    This is the real invariant: one reminder must produce exactly ONE delivery.
+    Counting new lines is unreliable because the live cron may have delivered
+    first (writing the same key), which then makes every worker skip and the
+    count look like zero. Counting entries for this task id is stable whether
+    the cron or a worker won the race.
+    """
+    n = 0
     try:
         with open(LEDGER, encoding="utf-8") as fh:
-            return sum(1 for _ in fh)
+            for line in fh:
+                if tid in line:
+                    n += 1
     except OSError:
         return 0
+    return n
 
 
 def main() -> int:
@@ -70,18 +95,25 @@ def main() -> int:
         return 2
     print(f"  due confirmed ({len(due)} due now)")
 
-    before = ledger_lines()
+    before = ledger_entries_for(tid)
+    # This test must not fight the live per-minute cron, which ticks at :40 and
+    # would otherwise hold the lock or deliver mid-test. Stopping the scheduler
+    # is not an option: it runs inside hermes-gateway, and stopping that would
+    # kill the user's messaging. Instead the workers are started in the same
+    # instant as each other, right after a fresh minute begins, and the assertion
+    # is on the LEDGER (one entry), which the cron cannot inflate because it
+    # writes the same key this run does.
     procs = [subprocess.Popen(
         [sys.executable, "remind.py"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for _ in range(WORKERS)]
     outputs = [p.communicate(timeout=180)[0] for p in procs]
-    after = ledger_lines()
-    new = after - before
+    after = ledger_entries_for(tid)
+    new = after
 
     delivered = sum("1 delivered" in o for o in outputs)
     print(f"\n{WORKERS} concurrent workers")
-    print(f"  ledger entries added : {new}")
+    print(f"  ledger entries for this task: {new} (before: {before})")
     print(f"  runs reporting a send: {delivered}")
     for i, o in enumerate(outputs, 1):
         last = [ln for ln in o.strip().splitlines() if ln.strip()]
@@ -93,10 +125,13 @@ def main() -> int:
     left = len(rows) if isinstance(rows, list) else 0
     print(f"  probe task removed   : {left == 0}")
 
-    if new == 1 and delivered == 1 and left == 0:
+    # The invariant is exactly ONE delivery for one reminder. `delivered` counts
+    # workers that reported sending, which is 0 if the live cron won the race
+    # first - so it is bounded rather than required to be exactly 1.
+    if new == 1 and delivered <= 1 and left == 0:
         print("\nLOCK VERIFIED: exactly one delivery for one due reminder")
         return 0
-    print(f"\nFAILED: {new} ledger entries, {delivered} senders (want 1 and 1)")
+    print(f"\nFAILED: {new} ledger entries (want 1), {delivered} senders (want <=1)")
     return 1
 
 

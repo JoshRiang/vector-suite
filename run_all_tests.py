@@ -34,6 +34,9 @@ SUITES = [
     # Starts several reminder workers at once: a duplicate phone
     # notification is the user-visible cost of an unlocked race.
     ("reminder lock", ROOT / "verify_reminder_lock.py"),
+    # Right-edge overflow: the user reported text running off screen.
+    ("overflow", ROOT / "check_overflow.py"),
+    ("widget tap", ROOT / "verify_widget_tap.py"),
     ("hour grid", ROOT / "verify_hour_grid.py"),
     ("daily brief",   ROOT / "backend/test_daily_brief.py"),
     ("flutter apps",  ROOT / "check_apps.py"),
