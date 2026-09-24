@@ -31,6 +31,9 @@ SUITES = [
     ("command console", ROOT / "backend/test_commands.py"),
     ("command safety", ROOT / "backend/test_command_safety.py"),
     ("scheduler", ROOT / "backend/test_scheduler.py"),
+    # Starts several reminder workers at once: a duplicate phone
+    # notification is the user-visible cost of an unlocked race.
+    ("reminder lock", ROOT / "verify_reminder_lock.py"),
     ("hour grid", ROOT / "verify_hour_grid.py"),
     ("daily brief",   ROOT / "backend/test_daily_brief.py"),
     ("flutter apps",  ROOT / "check_apps.py"),

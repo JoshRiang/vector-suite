@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Send phone notifications for reminders that are due right now.
 
-The user chose "phone notification from the app only" for reminders, so this
-does NOT post to Telegram: it pushes to the device over FCM (or, if no device is
-registered, writes to a local outbox so the omission is visible rather than
-silent).
+Delivery order: FCM device push when credentials exist, then Telegram, then a
+local outbox so an undelivered reminder is visible rather than silent. Telegram
+is the working channel today - the app-push path needs a Firebase project and a
+device token from the app, and without a fallback the feature delivered nothing
+at all.
 
 Runs every minute from cron. Each reminder fires once, because a task's lead
 times produce a single one-minute window (see scheduler.due_reminders).
@@ -17,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +38,40 @@ import scheduler  # noqa: E402
 USER_ID = "josh"
 OUTBOX = os.path.join(HERE, "..", "data", "reminder_outbox.jsonl")
 SENT_LOG = os.path.join(HERE, "..", "data", "reminders_sent.jsonl")
+LOCK = os.path.join(HERE, "..", "data", ".remind.lock")
+
+
+def _claim_lock() -> bool:
+    """Take an exclusive lock so two runs cannot both deliver one reminder.
+
+    The cron ticks every minute and a manual run (or a slow delivery) can
+    overlap it. Both would read the sent-ledger before either wrote to it, so
+    the same reminder was delivered twice - observed as two ledger entries
+    0.36s apart for one reminder. O_EXCL is atomic, so only one process wins.
+    """
+    try:
+        os.makedirs(os.path.dirname(LOCK), exist_ok=True)
+        fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        # A crashed run must not wedge reminders forever: expire a stale lock.
+        try:
+            age = time.time() - os.path.getmtime(LOCK)
+            if age > 300:
+                os.remove(LOCK)
+                return _claim_lock()
+        except OSError:
+            pass
+        return False
+
+
+def _release_lock() -> None:
+    try:
+        os.remove(LOCK)
+    except OSError:
+        pass
 
 
 def already_sent(task_id: str, lead: int, at: str) -> bool:
@@ -66,12 +102,40 @@ def mark_sent(task_id: str, lead: int, at: str) -> None:
                              "sent_at": datetime.now().isoformat()}) + "\n")
 
 
-def push(title: str, body: str) -> bool:
-    """Deliver one notification to the phone. Returns True if it was delivered.
+def telegram(title: str, body: str) -> bool:
+    """Deliver one notification over Telegram. Returns True if it was delivered.
 
-    FCM is attempted only when credentials exist; otherwise the notification is
-    written to the outbox and reported as undelivered, so a missing device shows
-    up as a fact rather than a silent no-op.
+    The app-push path needs a Firebase project and a device token from the app;
+    neither exists, so reminders delivered ZERO and the user - who ranked
+    reminders as the single most important feature - got nothing at all. The
+    Telegram gateway is already authenticated and working, so it is used as a
+    fallback rather than leaving the feature inert.
+
+    The message is prefixed so a reminder is distinguishable from a chat reply.
+    """
+    import subprocess
+    text = f"⏰ {title}\n{body}"
+    try:
+        proc = subprocess.run(
+            ["hermes", "send", "--to", "telegram", text],
+            capture_output=True, text=True, timeout=60)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  telegram failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return False
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip().splitlines()
+        print(f"  telegram failed: {err[-1] if err else 'no output'}",
+              file=sys.stderr)
+        return False
+    return True
+
+
+def push(title: str, body: str) -> bool:
+    """Deliver one notification. Returns True if it was delivered.
+
+    Tries FCM first when credentials exist, then Telegram. Only when BOTH fail
+    is the notification written to the outbox and reported as undelivered, so a
+    missing delivery channel shows up as a fact rather than a silent no-op.
     """
     server_key = os.environ.get("FCM_SERVER_KEY")
     device_token = os.environ.get("FCM_DEVICE_TOKEN")
@@ -89,10 +153,14 @@ def push(title: str, body: str) -> bool:
                      "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=20) as r:
-                return r.status == 200
+                if r.status == 200:
+                    return True
         except Exception as exc:  # noqa: BLE001
             print(f"  push failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-            return False
+        # Fall through to Telegram rather than dropping the reminder.
+
+    if telegram(title, body):
+        return True
 
     os.makedirs(os.path.dirname(OUTBOX), exist_ok=True)
     with open(OUTBOX, "a", encoding="utf-8") as fh:
@@ -103,6 +171,19 @@ def push(title: str, body: str) -> bool:
 
 def main() -> int:
     check_only = "--check" in sys.argv
+    if not check_only and not _claim_lock():
+        # Another run holds the lock. Skipping is correct: the holder will see
+        # the same due reminders, and delivering twice is worse than a delay of
+        # one tick.
+        return 0
+    try:
+        return _run(check_only)
+    finally:
+        if not check_only:
+            _release_lock()
+
+
+def _run(check_only: bool) -> int:
     due = scheduler.due_reminders(USER_ID)
     if not due:
         return 0
