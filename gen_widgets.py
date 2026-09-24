@@ -72,6 +72,25 @@ COMMON = r'''
     /** Group digits so a 7-figure amount stays readable in a narrow widget. */
     private fun fmt(v: Double): String = String.format("%,.0f", v)
 
+    /** Short label for a priority. 1 is the most important. */
+    private fun priLabel(p: Int): String = when (p) {
+        1 -> "P1"
+        2 -> "P2"
+        3 -> "P3"
+        4 -> "P4"
+        else -> "P5"
+    }
+
+    /** Badge colour for a priority. Paired with priLabel so meaning is never
+     *  carried by colour alone. */
+    private fun priColor(p: Int): Int = when (p) {
+        1 -> 0xFFEF4444.toInt()
+        2 -> 0xFFF59E0B.toInt()
+        3 -> 0xFF6366F1.toInt()
+        4 -> 0xFF9CA3AF.toInt()
+        else -> 0xFFC7C7CC.toInt()
+    }
+
     /**
      * Endpoints tried in order, after the configured one.
      *
@@ -210,7 +229,8 @@ BINDROW = r'''
         taskId: String?,
         title: String,
         meta: String,
-        done: Boolean
+        done: Boolean,
+        priority: Int = 3
     ) {
         val rowIds = intArrayOf(
             R.id.row0, R.id.row1, R.id.row2, R.id.row3, R.id.row4)
@@ -223,15 +243,25 @@ BINDROW = r'''
         val subIds = intArrayOf(
             R.id.row0_sub, R.id.row1_sub, R.id.row2_sub,
             R.id.row3_sub, R.id.row4_sub)
+        val priIds = intArrayOf(
+            R.id.row0_pri, R.id.row1_pri, R.id.row2_pri,
+            R.id.row3_pri, R.id.row4_pri)
 
         if (taskId == null) {
             views.setViewVisibility(rowIds[idx], android.view.View.GONE)
             return
         }
         views.setViewVisibility(rowIds[idx], android.view.View.VISIBLE)
+        // A filled box for done, an empty circle for open: the state has to be
+        // readable at a glance from the home screen, which is the whole point of
+        // a checklist widget.
         views.setTextViewText(boxIds[idx], if (done) "\u2713" else "\u25CB")
         views.setTextViewText(txtIds[idx], title)
         views.setTextViewText(subIds[idx], meta)
+        // Priority badge. Colour alone is not readable for everyone, so the
+        // label carries the meaning too.
+        views.setTextViewText(priIds[idx], priLabel(priority))
+        views.setInt(priIds[idx], "setBackgroundColor", priColor(priority))
 
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         // Tapping the checkbox completes the task; tapping the text opens the
@@ -356,11 +386,16 @@ class {widget_class} : AppWidgetProvider() {{
                 if (i < rows.length()) {{
                     val o = rows.getJSONObject(i)
                     val mins = o.optInt("minutes", 30)
+                    // The server decides the order; the priority is shown so the
+                    // ranking is visible rather than something the user has to
+                    // trust. 1 is most important.
+                    val pri = o.optInt("priority", 3)
                     bindRow(context, views, i,
                         o.optString("id", null),
                         o.optString("title", "Untitled task"),
                         mins.toString() + " min",
-                        false)
+                        false,
+                        pri)
                     shown++
                 }} else {{
                     bindRow(context, views, i, null, "", "", false)
@@ -810,6 +845,20 @@ def task_row(i: int) -> str:
                 android:textColor="#8E8E93"
                 android:maxLines="1" />
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/row{i}_pri"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:textSize="9sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:background="#C7C7CC" />
     </LinearLayout>
 '''
 
