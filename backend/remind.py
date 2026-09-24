@@ -35,7 +35,7 @@ for _cand in (os.path.join(HERE, "..", ".env"), os.path.join(HERE, ".env")):
 
 import scheduler  # noqa: E402
 
-USER_ID = "josh"
+USER_ID = os.environ.get("VECTOR_USER", "josh")
 OUTBOX = os.path.join(HERE, "..", "data", "reminder_outbox.jsonl")
 SENT_LOG = os.path.join(HERE, "..", "data", "reminders_sent.jsonl")
 LOCK = os.path.join(HERE, "..", "data", ".remind.lock")

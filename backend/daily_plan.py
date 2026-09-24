@@ -33,7 +33,7 @@ for _cand in (os.path.join(HERE, "..", ".env"), os.path.join(HERE, ".env")):
 
 import scheduler  # noqa: E402
 
-USER_ID = "josh"
+USER_ID = os.environ.get("VECTOR_USER", "josh")
 WEEKDAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
